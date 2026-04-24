@@ -1,0 +1,6 @@
+wandb*
+bash_scripts
+bash_outputs
+slurm_scripts
+slurm_outputs
+__pycache__
