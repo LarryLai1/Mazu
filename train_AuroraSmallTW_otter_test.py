@@ -36,45 +36,46 @@ logging.basicConfig(
 logger = get_logger(__name__, log_level = "INFO")
 
 
-def load_partial_state_dict(model: torch.nn.Module, checkpoint_state_dict: dict[str, torch.Tensor]):
-    """Load only keys that exist in model and have matching shapes.
-
-    This is useful when model architecture changed (e.g. GELU -> SwiGLU FFN, RoPE switches)
-    and full strict loading would fail.
-    """
-    model_state_dict = model.state_dict()
-
-    loadable_state_dict: dict[str, torch.Tensor] = {}
-    skipped_shape: list[str] = []
-    skipped_missing: list[str] = []
-
-    for key, tensor in checkpoint_state_dict.items():
-        if key not in model_state_dict:
-            skipped_missing.append(key)
+def _split_muon_and_adamw_params(model):
+    muon_params = []
+    adamw_params = []
+    for param in model.parameters():
+        if not param.requires_grad:
             continue
-        if model_state_dict[key].shape != tensor.shape:
-            skipped_shape.append(key)
-            continue
-        loadable_state_dict[key] = tensor
+        if param.ndim == 2:
+            muon_params.append(param)
+        else:
+            adamw_params.append(param)
+    return muon_params, adamw_params
 
-    msg = model.load_state_dict(loadable_state_dict, strict = False)
 
-    logger.info(
-        "Partial load summary: loaded=%d, skipped_shape=%d, skipped_missing=%d, "
-        "model_missing_after_load=%d, model_unexpected_after_load=%d",
-        len(loadable_state_dict),
-        len(skipped_shape),
-        len(skipped_missing),
-        len(msg.missing_keys),
-        len(msg.unexpected_keys),
-    )
+class OptimizerBundle:
+    def __init__(self, optimizers):
+        self.optimizers = [opt for opt in optimizers if opt is not None]
 
-    if skipped_shape:
-        logger.info("Sample shape-mismatch keys (up to 20): %s", skipped_shape[:20])
-    if skipped_missing:
-        logger.info("Sample checkpoint-only keys (up to 20): %s", skipped_missing[:20])
+    @property
+    def param_groups(self):
+        groups = []
+        for opt in self.optimizers:
+            groups.extend(opt.param_groups)
+        return groups
 
-    return msg
+    def zero_grad(self):
+        for opt in self.optimizers:
+            opt.zero_grad()
+
+    def step(self):
+        for opt in self.optimizers:
+            opt.step()
+
+
+class SchedulerBundle:
+    def __init__(self, schedulers):
+        self.schedulers = [sch for sch in schedulers if sch is not None]
+
+    def step(self):
+        for sch in self.schedulers:
+            sch.step()
 
 
 
@@ -154,7 +155,7 @@ def create_model(
     elif args.checkpoint_path:
         logger.info(f"Loading checkpoint: {args.checkpoint_path}")
         state_dict = load_file(args.checkpoint_path)
-        load_partial_state_dict(model, state_dict)
+        model.load_state_dict(state_dict, strict = False)
     return model
 
 def create_dataset(args, split):
@@ -243,8 +244,8 @@ def train_epoch(
         args,
         model,
         dataloader,
-        optimizer,
-        scheduler,
+    optimizer_bundle,
+    scheduler_bundle,
         criterion,
         accelerator,
         epoch,
@@ -273,7 +274,7 @@ def train_epoch(
 
     accumulation_steps = args.muon_gradient_accumulation_steps if args.use_muon else 1
 
-    optimizer.zero_grad()
+    optimizer_bundle.zero_grad()
 
     for batch_idx, batch in enumerate(pbar):
 
@@ -336,15 +337,15 @@ def train_epoch(
                 args.max_grad_norm,
             )
 
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
+            optimizer_bundle.step()
+            scheduler_bundle.step()
+            optimizer_bundle.zero_grad()
         gather_train_loss = accelerator.gather( loss )
 
         total_train_loss += gather_train_loss.sum().item()
         total_train_samples += gather_train_loss.shape[0]
 
-        current_lr = optimizer.param_groups[0]["lr"]
+        current_lr = optimizer_bundle.param_groups[0]["lr"]
         step_loss = gather_train_loss.mean().item()
 
         if accelerator.is_main_process and should_step:
@@ -524,14 +525,39 @@ def main():
         num_workers = args.num_workers, pin_memory = True,
     )
 
-    opt = AdamW if not args.use_muon else Muon
-    # opt = AdamW
+    effective_lr = args.lr * args.muon_gradient_accumulation_steps if args.use_muon else args.lr
+    muon_params, adamw_params = _split_muon_and_adamw_params(model)
 
-    optimizer = opt(
-        model.parameters(),
-        lr = args.lr,
-        weight_decay = args.weight_decay,
-    )
+    if args.use_muon:
+        logger.info(
+            "Using hybrid optimizer with accumulation: base_lr=%.8e, accum_steps=%d, effective_lr=%.8e",
+            args.lr,
+            args.muon_gradient_accumulation_steps,
+            effective_lr,
+        )
+        logger.info(
+            "Hybrid split: muon_2d_params=%d, adamw_other_params=%d",
+            sum(p.numel() for p in muon_params),
+            sum(p.numel() for p in adamw_params),
+        )
+        muon_optimizer = Muon(
+            muon_params,
+            lr = effective_lr,
+            weight_decay = args.weight_decay,
+        ) if len(muon_params) > 0 else None
+        adamw_optimizer = AdamW(
+            adamw_params,
+            lr = effective_lr,
+            weight_decay = args.weight_decay,
+        ) if len(adamw_params) > 0 else None
+    else:
+        logger.info("Using AdamW: lr=%.8e", effective_lr)
+        muon_optimizer = None
+        adamw_optimizer = AdamW(
+            model.parameters(),
+            lr = effective_lr,
+            weight_decay = args.weight_decay,
+        )
 
     criterion = AuroraMAELoss
 
@@ -542,16 +568,34 @@ def main():
     total_training_steps = args.epochs * updates_per_epoch
     warmup_steps = int(args.warmup_step_ratio * total_training_steps)
 
-    scheduler = get_scheduler_with_warmup(
-        optimizer,
+    adamw_scheduler = get_scheduler_with_warmup(
+        adamw_optimizer,
         warmup_steps = warmup_steps,
         training_steps = total_training_steps,
         schedule_type = "cosine",
-    )
+    ) if adamw_optimizer is not None else None
+    muon_scheduler = get_scheduler_with_warmup(
+        muon_optimizer,
+        warmup_steps = warmup_steps,
+        training_steps = total_training_steps,
+        schedule_type = "cosine",
+    ) if muon_optimizer is not None else None
 
-    model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
-        model, optimizer, train_loader, val_loader, scheduler,
-    )
+    if args.use_muon and muon_optimizer is not None and adamw_optimizer is not None:
+        model, adamw_optimizer, muon_optimizer, train_loader, val_loader, adamw_scheduler, muon_scheduler = accelerator.prepare(
+            model, adamw_optimizer, muon_optimizer, train_loader, val_loader, adamw_scheduler, muon_scheduler,
+        )
+    elif muon_optimizer is not None:
+        model, muon_optimizer, train_loader, val_loader, muon_scheduler = accelerator.prepare(
+            model, muon_optimizer, train_loader, val_loader, muon_scheduler,
+        )
+    else:
+        model, adamw_optimizer, train_loader, val_loader, adamw_scheduler = accelerator.prepare(
+            model, adamw_optimizer, train_loader, val_loader, adamw_scheduler,
+        )
+
+    optimizer_bundle = OptimizerBundle([adamw_optimizer, muon_optimizer])
+    scheduler_bundle = SchedulerBundle([adamw_scheduler, muon_scheduler])
 
     train_global_step = 0
     train_micro_step = 0
@@ -563,8 +607,8 @@ def main():
             args,
             model,
             train_loader,
-            optimizer,
-            scheduler,
+            optimizer_bundle,
+            scheduler_bundle,
             criterion,
             accelerator,
             epoch,

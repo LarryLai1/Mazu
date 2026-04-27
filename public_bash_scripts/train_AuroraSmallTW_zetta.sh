@@ -1,8 +1,7 @@
 #!/bin/bash
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-# export CUDA_VISIBLE_DEVICES=6
-export CUDA_VISIBLE_DEVICES=4,5
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 export WANDB_API_KEY="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"
 export WANDB_ENTITY="noiselarry1234-taiwan"
@@ -18,21 +17,6 @@ PROJECT="Mazu"
 NAME="${PROJECT}-MUON:${USE_MUON}_SWIGLU:${USE_SWIGLU_FFN}_ROPE:${USE_ROPE_EMBEDDING}-epochs=50"
 OUTPUT_DIR="./${PROJECT}_training_results/${NAME}"
 
-# Derive worker/process count from CUDA_VISIBLE_DEVICES.
-# Examples:
-# - "4,5" -> 2
-# - "all" -> number of GPUs from nvidia-smi
-if [[ -z "${CUDA_VISIBLE_DEVICES}" || "${CUDA_VISIBLE_DEVICES}" == "all" ]]; then
-    GPU_COUNT=$(nvidia-smi --list-gpus 2>/dev/null | wc -l)
-else
-    GPU_COUNT=$(echo "${CUDA_VISIBLE_DEVICES}" | awk -F',' '{print NF}')
-fi
-
-# Keep a safe minimum of 1 in case detection fails.
-if ! [[ "${GPU_COUNT}" =~ ^[0-9]+$ ]] || [[ "${GPU_COUNT}" -lt 1 ]]; then
-    GPU_COUNT=1
-fi
-
 
 OPTIONAL_ARGS=()
 if [[ "$USE_MUON" == "1" ]]; then
@@ -47,9 +31,8 @@ fi
 
 time \
 accelerate launch --config_file ./public_bash_scripts/accelerate_training_config.yaml \
-    --num_processes "${GPU_COUNT}" \
     ./train_AuroraSmallTW_otter_test.py \
-    --data_root_dir "/home/yunye0121/era5_tw" \
+    --data_root_dir "/work/datasets/era5_tw" \
     --output_dir "${OUTPUT_DIR}" \
     --seed 1126 \
     --train_start_date_hour "2013-01-01 00:00:00" \
@@ -73,7 +56,7 @@ accelerate launch --config_file ./public_bash_scripts/accelerate_training_config
     --warmup_step_ratio 0.1 \
     --train_batch_size 8 \
     --val_batch_size 8 \
-    --num_workers "${GPU_COUNT}"  \
+    --num_workers 4  \
     --checkpointing_epochs 25 \
     --report_to wandb \
     --tracker_project_name "${PROJECT}" \
