@@ -9,7 +9,7 @@ Code adapted from
 import itertools
 from datetime import timedelta
 from functools import lru_cache
-from typing import Optional
+from typing import Literal, Optional
 
 import torch
 import torch.nn as nn
@@ -66,6 +66,43 @@ class MLP(nn.Module):
         return x
 
 
+class SwiGLUMLP(nn.Module):
+    """A one-hidden-layer SwiGLU MLP with dropout after gating and at the end."""
+
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: Optional[int] = None,
+        out_features: Optional[int] = None,
+        drop: float = 0.0,
+    ) -> None:
+        """Initialise.
+
+        Args:
+            in_features (int): Input dimensionality.
+            hidden_features (int, optional): Hidden layer dimensionality used after gating.
+                Defaults to the input dimensionality.
+            out_features (int, optional): Output dimensionality. Defaults to the input
+                dimensionality.
+            drop (float, optional): Drop-out rate. Defaults to no drop-out.
+        """
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Linear(in_features, hidden_features * 2)
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the SwiGLU MLP."""
+        x_proj, gate = self.fc1(x).chunk(2, dim=-1)
+        x = x_proj * F.silu(gate)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
+
+
 class WindowAttention(nn.Module):
     """Window-based multi-head self-attention (W-MSA).
 
@@ -81,6 +118,7 @@ class WindowAttention(nn.Module):
         qk_scale: Optional[float] = None,
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
+        use_rope_embedding: bool = False,
         lora_r: int = 8,
         lora_alpha: int = 8,
         lora_dropout: float = 0.0,
@@ -100,6 +138,8 @@ class WindowAttention(nn.Module):
                 `1/sqrt(head_dim)`.
             attn_drop (float, optional): Drop-out rate of attention weights. Default to `0.0`.
             proj_drop (float, optional): Drop-out rate of the output. Default to `0.0`.
+            use_rope_embedding (bool, optional): Apply rotary positional embedding to query and
+                key. Defaults to `False`.
             lora_r (int, optional): LoRA rank. Defaults to `8`.
             lora_alpha (int, optional): LoRA alpha. Defaults to `8`.
             lora_dropout (float, optional): LoRA drop-out rate. Defaults to `0.0`.
@@ -116,6 +156,7 @@ class WindowAttention(nn.Module):
         self.num_heads = num_heads
         assert dim % num_heads == 0, f"dim ({dim}) should be divisible by num_heads ({num_heads})."
         self.head_dim = dim // num_heads
+        self.use_rope_embedding = use_rope_embedding
 
         self.attn_drop = attn_drop
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
@@ -153,6 +194,9 @@ class WindowAttention(nn.Module):
         qkv = self.qkv(x) + self.lora_qkv(x, rollout_step)
         qkv = rearrange(qkv, "B N (qkv H D) -> qkv B H N D", H=self.num_heads, qkv=3)
         q, k, v = qkv[0], qkv[1], qkv[2]
+        if self.use_rope_embedding:
+            q = _apply_rope(q)
+            k = _apply_rope(k)
         attn_dropout = self.attn_drop if self.training else 0.0
 
         if mask is not None:
@@ -360,6 +404,39 @@ def compute_3d_shifted_window_mask(
     return attn_mask, img_mask
 
 
+def _apply_rope(x: torch.Tensor) -> torch.Tensor:
+    """Apply 1D rotary positional embedding along the token axis.
+
+    Args:
+        x (torch.Tensor): Tensor of shape `(B, H, N, D)`.
+
+    Returns:
+        torch.Tensor: Tensor with RoPE applied, same shape as input.
+    """
+    d = x.shape[-1]
+    if d % 2 != 0:
+        raise ValueError(f"RoPE requires even head dimension, but got {d}.")
+
+    half = d // 2
+    device = x.device
+    base_dtype = torch.float32
+    positions = torch.arange(x.shape[-2], device=device, dtype=base_dtype)
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, half, device=device, dtype=base_dtype) / half))
+    freqs = torch.outer(positions, inv_freq)
+    cos = torch.cos(freqs).to(dtype=x.dtype)[None, None, :, :]
+    sin = torch.sin(freqs).to(dtype=x.dtype)[None, None, :, :]
+
+    x_even = x[..., 0::2]
+    x_odd = x[..., 1::2]
+    x_rot_even = x_even * cos - x_odd * sin
+    x_rot_odd = x_even * sin + x_odd * cos
+
+    x_out = torch.empty_like(x)
+    x_out[..., 0::2] = x_rot_even
+    x_out[..., 1::2] = x_rot_odd
+    return x_out
+
+
 class Swin3DTransformerBlock(nn.Module):
     """3D Swin Transformer block."""
 
@@ -376,6 +453,8 @@ class Swin3DTransformerBlock(nn.Module):
         attn_drop: float = 0.0,
         drop_path: float = 0.0,
         act_layer: type = nn.GELU,
+        ffn_type: Literal["gelu", "swiglu"] = "gelu",
+        use_rope_embedding: bool = False,
         scale_bias: float = 0.0,
         lora_steps: int = 40,
         lora_mode: LoRAMode = "single",
@@ -399,6 +478,10 @@ class Swin3DTransformerBlock(nn.Module):
             drop_path (float, optional): Stochastic depth rate. Defaults to `0.0`
             act_layer (type, optional): Activation function to use. Will be instantiated as
                 `act_layer()`. Defaults to `torch.nn.GELU`.
+            ffn_type (Literal["gelu", "swiglu"], optional): Feed-forward block type.
+                Defaults to `"gelu"`.
+            use_rope_embedding (bool, optional): Apply rotary positional embedding to query and
+                key in window attention. Defaults to `False`.
             scale_bias (float, optional): Scale bias for
                 :class:`aurora.model.film.AdaptiveLayerNorm`. Defaults to `0`.
             lora_steps (int, optional): Maximum number of LoRA roll-out steps. Defaults to `40`.
@@ -413,6 +496,10 @@ class Swin3DTransformerBlock(nn.Module):
         self.shift_size = shift_size
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
+        self.ffn_type = ffn_type
+
+        if self.ffn_type not in {"gelu", "swiglu"}:
+            raise ValueError(f"Unsupported `ffn_type`: {self.ffn_type}.")
 
         self.norm1 = AdaptiveLayerNorm(dim, time_dim, scale_bias=scale_bias)
         self.attn = WindowAttention(
@@ -422,6 +509,7 @@ class Swin3DTransformerBlock(nn.Module):
             qkv_bias=qkv_bias,
             attn_drop=attn_drop,
             proj_drop=drop,
+            use_rope_embedding=use_rope_embedding,
             lora_steps=lora_steps,
             use_lora=use_lora,
             lora_mode=lora_mode,
@@ -429,13 +517,22 @@ class Swin3DTransformerBlock(nn.Module):
 
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = AdaptiveLayerNorm(dim, time_dim, scale_bias=scale_bias)
-        mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = MLP(
-            in_features=dim,
-            hidden_features=mlp_hidden_dim,
-            act_layer=act_layer,
-            drop=drop,
-        )
+        if self.ffn_type == "swiglu":
+            # Keep compute/parameter budget close to GELU FFN by reducing hidden width.
+            mlp_hidden_dim = max(1, (int((2.0 / 3.0) * dim * mlp_ratio)+127) // 128 * 128)  # Round to multiple of 128.
+            self.mlp = SwiGLUMLP(
+                in_features=dim,
+                hidden_features=mlp_hidden_dim,
+                drop=drop,
+            )
+        else:
+            mlp_hidden_dim = int(dim * mlp_ratio) + 127 // 128 * 128  # Round to multiple of 128.
+            self.mlp = MLP(
+                in_features=dim,
+                hidden_features=mlp_hidden_dim,
+                act_layer=act_layer,
+                drop=drop,
+            )
 
     def forward(
         self,
@@ -628,6 +725,8 @@ class BasicLayer3D(nn.Module):
         drop: float = 0.0,
         attn_drop: float = 0.0,
         drop_path: float | list[float] = 0.0,
+        ffn_type: Literal["gelu", "swiglu"] = "gelu",
+        use_rope_embedding: bool = False,
         downsample: type[PatchMerging3D] | None = None,
         upsample: type[PatchSplitting3D] | None = None,
         scale_bias: float = 0.0,
@@ -650,6 +749,10 @@ class BasicLayer3D(nn.Module):
             drop (float): Drop-out rate. Defaults to `0.0`.
             attn_drop (float): Attention drop-out rate. Defaults to `0.0`.
             drop_path (float): Stochastic depth rate. Defaults to `0.0`.
+            ffn_type (Literal["gelu", "swiglu"], optional): Feed-forward block type.
+                Defaults to `"gelu"`.
+            use_rope_embedding (bool, optional): Apply rotary positional embedding to query and
+                key in window attention. Defaults to `False`.
             downsample (PatchMerging3D, optional): Downsampling layer. Defaults to no downsampling.
             upsample (PatchSplitting3D, optional): Upsampling layer. Defaults to no upsampling.
             scale_bias (float, optional): Scale bias for
@@ -683,6 +786,8 @@ class BasicLayer3D(nn.Module):
                     drop=drop,
                     attn_drop=attn_drop,
                     drop_path=(drop_path[i] if isinstance(drop_path, list) else drop_path),
+                    ffn_type=ffn_type,
+                    use_rope_embedding=use_rope_embedding,
                     scale_bias=scale_bias,
                     use_lora=use_lora,
                     lora_steps=lora_steps,
@@ -764,6 +869,8 @@ class Swin3DTransformerBackbone(nn.Module):
         drop_rate: float = 0.0,
         attn_drop_rate: float = 0.0,
         drop_path_rate: float = 0.0,
+        ffn_type: Literal["gelu", "swiglu"] = "gelu",
+        use_rope_embedding: bool = False,
         lora_steps: int = 40,
         lora_mode: LoRAMode = "single",
         use_lora: bool = False,
@@ -787,6 +894,10 @@ class Swin3DTransformerBackbone(nn.Module):
             drop_rate (float): Drop-out rate. Defaults to `0.0`.
             attn_drop_rate (float): Attention drop-out rate. Defaults to `0.0`.
             drop_path_rate (float): Stochastic depth rate. Defaults to `0.0`.
+            ffn_type (Literal["gelu", "swiglu"], optional): Feed-forward block type.
+                Defaults to `"gelu"`.
+            use_rope_embedding (bool, optional): Apply rotary positional embedding to query and
+                key in window attention. Defaults to `False`.
             lora_steps (int, optional): Maximum number of LoRA roll-out steps. Defaults to `40`.
             lora_mode (str, optional): LoRA mode. `"single"` uses the same LoRA for all roll-out
                 steps, `"from_second"` uses the same LoRA from the second roll-out step on,
@@ -800,6 +911,8 @@ class Swin3DTransformerBackbone(nn.Module):
         self.num_decoder_layers = len(decoder_depths)
         self.embed_dim = embed_dim
         self.mlp_ratio = mlp_ratio
+        self.ffn_type = ffn_type
+        self.use_rope_embedding = use_rope_embedding
 
         # Time embedding MLP
         self.time_mlp = nn.Sequential(
@@ -827,6 +940,8 @@ class Swin3DTransformerBackbone(nn.Module):
                 drop=drop_rate,
                 attn_drop=attn_drop_rate,
                 drop_path=dpr[sum(encoder_depths[:i_layer]) : sum(encoder_depths[: i_layer + 1])],
+                ffn_type=self.ffn_type,
+                use_rope_embedding=self.use_rope_embedding,
                 downsample=(PatchMerging3D if (i_layer < self.num_encoder_layers - 1) else None),
                 use_lora=use_lora,
                 lora_steps=lora_steps,
@@ -849,6 +964,8 @@ class Swin3DTransformerBackbone(nn.Module):
                 drop=drop_rate,
                 attn_drop=attn_drop_rate,
                 drop_path=dpr[sum(decoder_depths[:i_layer]) : sum(decoder_depths[: i_layer + 1])],
+                ffn_type=self.ffn_type,
+                use_rope_embedding=self.use_rope_embedding,
                 upsample=(PatchSplitting3D if (i_layer < self.num_decoder_layers - 1) else None),
                 use_lora=use_lora,
                 lora_steps=lora_steps,

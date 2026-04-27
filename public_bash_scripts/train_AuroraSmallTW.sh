@@ -1,20 +1,38 @@
 #!/bin/bash
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=2,4,5,6
 
 export WANDB_API_KEY="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"
 export WANDB_ENTITY="noiselarry1234-taiwan"
 export WANDB_DIR="./wandb_logs"
 
+# Boolean toggles for optional model features (1: enable, 0: disable)
+USE_MUON=1
+USE_SWIGLU_FFN=0
+USE_ROPE_EMBEDDING=0
+
 PROJECT="Mazu"
-NAME="${PROJECT}-epochs=400-traindt=20130101--20181231-valdt=2022-intw=1-rs=1-sd=1126-lr=3e-5-bs=8"
+# NAME="${PROJECT}-epochs=400-traindt=20130101--20181231-valdt=2022-intw=1-rs=1-sd=1126-lr=3e-5-bs=8"
+NAME="${PROJECT}-MUON:${USE_MUON}_SWIGLU:${USE_SWIGLU_FFN}_ROPE:${USE_ROPE_EMBEDDING}-epochs=50"
 OUTPUT_DIR="./${PROJECT}_training_results/${NAME}"
+
+
+OPTIONAL_ARGS=()
+if [[ "$USE_MUON" == "1" ]]; then
+    OPTIONAL_ARGS+=("--use_muon")
+fi
+if [[ "$USE_SWIGLU_FFN" == "1" ]]; then
+    OPTIONAL_ARGS+=("--use_swiglu_ffn")
+fi
+if [[ "$USE_ROPE_EMBEDDING" == "1" ]]; then
+    OPTIONAL_ARGS+=("--use_rope_embedding")
+fi
 
 time \
 accelerate launch --config_file ./public_bash_scripts/accelerate_training_config.yaml \
-    ./train_AuroraSmallTW.py \
-    --data_root_dir "/work/yunye0121/era5_tw" \
+    ./train_AuroraSmallTW_otter_test.py \
+    --data_root_dir "/home/yunye0121/era5_tw" \
     --output_dir "${OUTPUT_DIR}" \
     --seed 1126 \
     --train_start_date_hour "2013-01-01 00:00:00" \
@@ -32,15 +50,16 @@ accelerate launch --config_file ./public_bash_scripts/accelerate_training_config
     --rollout_step 1 \
     --timestep_hours 1 \
     --use_pretrained_weight \
-    --epochs 1 \
+    --epochs 50 \
     --lr 3e-5 \
     --weight_decay 1e-3 \
     --warmup_step_ratio 0.1 \
     --train_batch_size 8 \
     --val_batch_size 8 \
-    --num_workers 4 \
-    --checkpointing_epochs 50 \
+    --num_workers 4  \
+    --checkpointing_epochs 10 \
     --report_to wandb \
     --tracker_project_name "${PROJECT}" \
     --wandb_name "${NAME}" \
-    --mixed_precision "no" \
+    "${OPTIONAL_ARGS[@]}" \
+    --mixed_precision "no"

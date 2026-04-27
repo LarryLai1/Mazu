@@ -80,6 +80,8 @@ class Aurora(torch.nn.Module):
         use_lora: bool = True,
         lora_steps: int = 40,
         lora_mode: LoRAMode = "single",
+        ffn_type: str = "gelu",
+        use_rope_embedding: bool = False,
         surf_stats: Optional[dict[str, tuple[float, float]]] = None,
         autocast: bool = False,
         bf16_mode: bool = False,
@@ -142,6 +144,8 @@ class Aurora(torch.nn.Module):
             lora_mode (str, optional): LoRA mode. `"single"` uses the same LoRA for all roll-out
                 steps, `"from_second"` uses the same LoRA from the second roll-out step on, and
                 `"all"` uses a different LoRA for every roll-out step. Defaults to `"single"`.
+            use_rope_embedding (bool, optional): Apply rotary positional embedding to query and
+                key in backbone attention blocks. Defaults to `False`.
             surf_stats (dict[str, tuple[float, float]], optional): For these surface-level
                 variables, adjust the normalisation to the given tuple consisting of a new location
                 and scale.
@@ -225,6 +229,8 @@ class Aurora(torch.nn.Module):
             decoder_num_heads=decoder_num_heads,
             embed_dim=embed_dim,
             mlp_ratio=mlp_ratio,
+            ffn_type=ffn_type,
+            use_rope_embedding=use_rope_embedding,
             drop_path_rate=drop_path,
             attn_drop_rate=drop_rate,
             drop_rate=drop_rate,
@@ -453,7 +459,19 @@ class Aurora(torch.nn.Module):
                 f"into model with `max_history_size` {self.max_history_size}."
             )
 
-        self.load_state_dict(d, strict=strict)
+        if strict:
+            self.load_state_dict(d, strict=True)
+            return
+
+        # For architecture changes (e.g. different FFN type), only load keys that are both
+        # present and shape-compatible.
+        current_state = self.state_dict()
+        compatible: dict[str, torch.Tensor] = {}
+        for k, v in d.items():
+            if k in current_state and current_state[k].shape == v.shape:
+                compatible[k] = v
+
+        self.load_state_dict(compatible, strict=False)
 
     def _adapt_checkpoint(self, d: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Adapt an existing checkpoint to make it compatible with the current version of the model.
