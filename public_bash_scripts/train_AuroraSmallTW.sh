@@ -1,17 +1,66 @@
 #!/bin/bash
 
+set -euo pipefail
+
+DEFAULT_GPUS="5,6"
+USE_MUON=0
+USE_SWIGLU_FFN=0
+USE_ROPE_EMBEDDING=0
+CUDA_VISIBLE_DEVICES="${DEFAULT_GPUS}"
+
+print_usage() {
+    cat <<'EOF'
+Usage: train_AuroraSmallTW.sh [options]
+
+Options:
+    --gpus LIST               CUDA_VISIBLE_DEVICES value, e.g. 0,1 or 5,6
+    --use-muon                Enable Muon
+    --use-swiglu-ffn          Enable SwiGLU FFN
+    --use-rope-embedding      Enable RoPE embedding
+    -h, --help                Show this help message
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --gpus)
+            [[ $# -ge 2 ]] || { echo "Missing value for --gpus" >&2; exit 2; }
+            CUDA_VISIBLE_DEVICES="$2"
+            shift 2
+            ;;
+        --use-muon)
+            USE_MUON=1
+            shift
+            ;;
+        --use-swiglu-ffn)
+            USE_SWIGLU_FFN=1
+            shift
+            ;;
+        --use-rope-embedding)
+            USE_ROPE_EMBEDDING=1
+            shift
+            ;;
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            print_usage >&2
+            exit 2
+            ;;
+    esac
+done
+
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-# export CUDA_VISIBLE_DEVICES=6
-export CUDA_VISIBLE_DEVICES=4,5
+export CUDA_VISIBLE_DEVICES
+# export CUDA_VISIBLE_DEVICES=1,2,3,4
 
 export WANDB_API_KEY="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"
 export WANDB_ENTITY="noiselarry1234-taiwan"
 export WANDB_DIR="./wandb_logs"
 
 # Boolean toggles for optional model features (1: enable, 0: disable)
-USE_MUON=0
-USE_SWIGLU_FFN=1
-USE_ROPE_EMBEDDING=0
 
 PROJECT="Mazu"
 # NAME="${PROJECT}-epochs=400-traindt=20130101--20181231-valdt=2022-intw=1-rs=1-sd=1126-lr=3e-5-bs=8"
@@ -19,9 +68,6 @@ NAME="${PROJECT}-MUON:${USE_MUON}_SWIGLU:${USE_SWIGLU_FFN}_ROPE:${USE_ROPE_EMBED
 OUTPUT_DIR="./${PROJECT}_training_results/${NAME}"
 
 # Derive worker/process count from CUDA_VISIBLE_DEVICES.
-# Examples:
-# - "4,5" -> 2
-# - "all" -> number of GPUs from nvidia-smi
 if [[ -z "${CUDA_VISIBLE_DEVICES}" || "${CUDA_VISIBLE_DEVICES}" == "all" ]]; then
     GPU_COUNT=$(nvidia-smi --list-gpus 2>/dev/null | wc -l)
 else
@@ -49,7 +95,7 @@ time \
 accelerate launch --config_file ./public_bash_scripts/accelerate_training_config.yaml \
     --num_processes "${GPU_COUNT}" \
     ./train_AuroraSmallTW_otter_test.py \
-    --data_root_dir "/home/yunye0121/era5_tw" \
+    --data_root_dir "/tmp3/yunye0121/era5_tw" \
     --output_dir "${OUTPUT_DIR}" \
     --seed 1126 \
     --train_start_date_hour "2013-01-01 00:00:00" \

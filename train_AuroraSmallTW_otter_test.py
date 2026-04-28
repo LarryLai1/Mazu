@@ -10,7 +10,8 @@ import shutil
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from utils.model_utils import Muon
+from utils.muon import Muon
+# from utils.model_utils import Muon
 # from torch.optim import AdamW, Muon
 
 from accelerate import Accelerator
