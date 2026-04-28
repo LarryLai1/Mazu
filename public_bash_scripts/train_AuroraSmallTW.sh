@@ -15,8 +15,8 @@ Usage: train_AuroraSmallTW.sh [options]
 Options:
     --gpus LIST               CUDA_VISIBLE_DEVICES value, e.g. 0,1 or 5,6
     --use-muon                Enable Muon
-    --use-swiglu-ffn          Enable SwiGLU FFN
-    --use-rope-embedding      Enable RoPE embedding
+    --use-swiglu              Enable SwiGLU FFN
+    --use-rope                Enable RoPE embedding
     -h, --help                Show this help message
 EOF
 }
@@ -32,11 +32,11 @@ while [[ $# -gt 0 ]]; do
             USE_MUON=1
             shift
             ;;
-        --use-swiglu-ffn)
+        --use-swiglu)
             USE_SWIGLU_FFN=1
             shift
             ;;
-        --use-rope-embedding)
+        --use-rope)
             USE_ROPE_EMBEDDING=1
             shift
             ;;
