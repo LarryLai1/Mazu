@@ -85,8 +85,8 @@ def _apply_rotary_emb(
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
     freqs_cis = _reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(-2)
+    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(-2)
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
@@ -244,6 +244,7 @@ class WindowAttention(nn.Module):
         x: torch.Tensor,
         mask: torch.Tensor | None = None,
         rollout_step: int = 0,
+        window_size: tuple[int, int, int] | None = None,
     ) -> torch.Tensor:
         """Run the forward pass of the window-based multi-head self-attention layer.
 
@@ -260,7 +261,8 @@ class WindowAttention(nn.Module):
         qkv = rearrange(qkv, "B N (qkv H D) -> qkv B H N D", H=self.num_heads, qkv=3)
         q, k, v = qkv[0], qkv[1], qkv[2]
         if self.use_rope_embedding:
-            ws_c, ws_h, ws_w = self.window_size
+            ws = window_size or self.window_size
+            ws_c, ws_h, ws_w = ws
             batch = q.shape[0]
             heads = q.shape[1]
             hw_tokens = ws_h * ws_w
@@ -272,7 +274,7 @@ class WindowAttention(nn.Module):
             if q.shape[-2] != ws_c * hw_tokens:
                 raise ValueError(
                     "RoPE expects N == ws_c * ws_h * ws_w, "
-                    f"got N={q.shape[-2]} with ws={self.window_size}."
+                    f"got N={q.shape[-2]} with ws={ws}."
                 )
 
             freqs_cis = _precompute_freqs_cis_2d_hw(
@@ -677,7 +679,12 @@ class Swin3DTransformerBlock(nn.Module):
         x_windows = x_windows.view(-1, ws[0] * ws[1] * ws[2], D)  # (nW*B, ws*ws, D)
 
         # W-MSA/SW-MSA. Has shape (nW*B, ws*ws, D).
-        attn_windows = self.attn(x_windows, mask=attn_mask, rollout_step=rollout_step)
+        attn_windows = self.attn(
+            x_windows,
+            mask=attn_mask,
+            rollout_step=rollout_step,
+            window_size=ws,
+        )
 
         # Merge the windows into the original input (patch) resolution.
         attn_windows = attn_windows.view(-1, ws[0], ws[1], ws[2], D)  # (nW*B, Wc, Wh, Ww, D)
