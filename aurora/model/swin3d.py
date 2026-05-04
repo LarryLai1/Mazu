@@ -25,6 +25,56 @@ from aurora.model.util import init_weights, maybe_adjust_windows
 __all__ = ["Swin3DTransformerBackbone"]
 
 
+def _precompute_freqs_cis_1d(
+    dim: int, end: int, theta: float = 10000.0
+) -> torch.Tensor:
+    freqs = 1.0 / (
+        theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
+    )
+    t = torch.arange(end, device=freqs.device)
+    freqs = torch.outer(t, freqs).float()
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+    return freqs_cis
+
+
+def _precompute_freqs_cis_2d_hw(
+    head_dim: int, height: int, width: int, theta: float = 10000.0
+) -> torch.Tensor:
+    freqs_w = _precompute_freqs_cis_1d(head_dim // 2, width, theta)
+    freqs_h = _precompute_freqs_cis_1d(head_dim // 2, height, theta)
+
+    freqs_w = freqs_w[None, :, :]
+    freqs_h = freqs_h[:, None, :]
+
+    freqs_w = freqs_w.expand(height, -1, -1)
+    freqs_h = freqs_h.expand(-1, width, -1)
+
+    return torch.cat([freqs_w, freqs_h], dim=-1)
+
+
+def _reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    ndim = x.ndim
+    assert 0 <= 1 < ndim
+    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
+    shape = [
+        d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)
+    ]
+    return freqs_cis.view(*shape)
+
+
+def _apply_rotary_emb(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    freqs_cis: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+    freqs_cis = _reshape_for_broadcast(freqs_cis, xq_)
+    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
+    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    return xq_out.type_as(xq), xk_out.type_as(xk)
+
+
 class MLP(nn.Module):
     """A one-hidden-layer MLP with dropout after the hidden layer and at the end."""
 
@@ -195,8 +245,37 @@ class WindowAttention(nn.Module):
         qkv = rearrange(qkv, "B N (qkv H D) -> qkv B H N D", H=self.num_heads, qkv=3)
         q, k, v = qkv[0], qkv[1], qkv[2]
         if self.use_rope_embedding:
-            q = _apply_rope(q)
-            k = _apply_rope(k)
+            ws_c, ws_h, ws_w = self.window_size
+            batch = q.shape[0]
+            heads = q.shape[1]
+            hw_tokens = ws_h * ws_w
+            if q.shape[-1] % 2 != 0:
+                raise ValueError(
+                    "RoPE requires even head dimension, "
+                    f"but got {q.shape[-1]}."
+                )
+            if q.shape[-2] != ws_c * hw_tokens:
+                raise ValueError(
+                    "RoPE expects N == ws_c * ws_h * ws_w, "
+                    f"got N={q.shape[-2]} with ws={self.window_size}."
+                )
+
+            freqs_cis = _precompute_freqs_cis_2d_hw(
+                q.shape[-1], ws_h, ws_w
+            ).reshape(hw_tokens, q.shape[-1] // 2)
+
+            q = q.reshape(batch, heads, ws_c, hw_tokens, q.shape[-1])
+            k = k.reshape(batch, heads, ws_c, hw_tokens, k.shape[-1])
+
+            q = q.reshape(batch * heads * ws_c, hw_tokens, q.shape[-1])
+            k = k.reshape(batch * heads * ws_c, hw_tokens, k.shape[-1])
+            q, k = _apply_rotary_emb(q, k, freqs_cis)
+
+            q = q.reshape(batch, heads, ws_c, hw_tokens, q.shape[-1])
+            k = k.reshape(batch, heads, ws_c, hw_tokens, k.shape[-1])
+
+            q = q.reshape(batch, heads, ws_c * hw_tokens, q.shape[-1])
+            k = k.reshape(batch, heads, ws_c * hw_tokens, k.shape[-1])
         attn_dropout = self.attn_drop if self.training else 0.0
 
         if mask is not None:
