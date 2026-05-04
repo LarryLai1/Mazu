@@ -26,10 +26,17 @@ __all__ = ["Swin3DTransformerBackbone"]
 
 
 def _precompute_freqs_cis_1d(
-    dim: int, end: int, theta: float = 10000.0
+    dim: int,
+    end: int,
+    theta: float = 10000.0,
+    device: torch.device | None = None,
 ) -> torch.Tensor:
     freqs = 1.0 / (
-        theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
+        theta
+        ** (
+            torch.arange(0, dim, 2, device=device)[: (dim // 2)].float()
+            / dim
+        )
     )
     t = torch.arange(end, device=freqs.device)
     freqs = torch.outer(t, freqs).float()
@@ -38,10 +45,18 @@ def _precompute_freqs_cis_1d(
 
 
 def _precompute_freqs_cis_2d_hw(
-    head_dim: int, height: int, width: int, theta: float = 10000.0
+    head_dim: int,
+    height: int,
+    width: int,
+    theta: float = 10000.0,
+    device: torch.device | None = None,
 ) -> torch.Tensor:
-    freqs_w = _precompute_freqs_cis_1d(head_dim // 2, width, theta)
-    freqs_h = _precompute_freqs_cis_1d(head_dim // 2, height, theta)
+    freqs_w = _precompute_freqs_cis_1d(
+        head_dim // 2, width, theta, device=device
+    )
+    freqs_h = _precompute_freqs_cis_1d(
+        head_dim // 2, height, theta, device=device
+    )
 
     freqs_w = freqs_w[None, :, :]
     freqs_h = freqs_h[:, None, :]
@@ -261,7 +276,7 @@ class WindowAttention(nn.Module):
                 )
 
             freqs_cis = _precompute_freqs_cis_2d_hw(
-                q.shape[-1], ws_h, ws_w
+                q.shape[-1], ws_h, ws_w, device=q.device
             ).reshape(hw_tokens, q.shape[-1] // 2)
 
             q = q.reshape(batch, heads, ws_c, hw_tokens, q.shape[-1])
