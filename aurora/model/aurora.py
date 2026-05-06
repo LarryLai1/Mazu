@@ -564,6 +564,93 @@ class Aurora(torch.nn.Module):
                 f'{", ".join(sorted(set(module_names) - found))}.'
             )
 
+class AuroraEDM(Aurora):
+    def __init__(
+        self,
+        *,
+        surf_vars: tuple[str, ...] = ("2t", "10u", "10v", "msl"),
+        static_vars: tuple[str, ...] = ("lsm", "z", "slt"),
+        atmos_vars: tuple[str, ...] = ("z", "u", "v", "t", "q"),
+        window_size: tuple[int, int, int] = (2, 6, 12),
+        encoder_depths: tuple[int, ...] = (6, 10, 8),
+        encoder_num_heads: tuple[int, ...] = (8, 16, 32),
+        decoder_depths: tuple[int, ...] = (8, 10, 6),
+        decoder_num_heads: tuple[int, ...] = (32, 16, 8),
+        latent_levels: int = 4,
+        patch_size: int = 4,
+        embed_dim: int = 512,
+        num_heads: int = 16,
+        mlp_ratio: float = 4.0,
+        drop_path: float = 0.0,
+        drop_rate: float = 0.0,
+        enc_depth: int = 1,
+        dec_depth: int = 1,
+        dec_mlp_ratio: float = 2.0,
+        perceiver_ln_eps: float = 1e-5,
+        max_history_size: int = 2,
+        timestep: timedelta = timedelta(hours=6),
+        stabilise_level_agg: bool = False,
+        use_lora: bool = True,
+        lora_steps: int = 40,
+        lora_mode: LoRAMode = "single",
+        ffn_type: str = "gelu",
+        use_rope_embedding: bool = False,
+        surf_stats: Optional[dict[str, tuple[float, float]]] = None,
+        autocast: bool = False,
+        bf16_mode: bool = False,
+        level_condition: Optional[tuple[int | float, ...]] = None,
+        dynamic_vars: bool = False,
+        atmos_static_vars: bool = False,
+        separate_perceiver: tuple[str, ...] = (),
+        modulation_heads: tuple[str, ...] = (),
+        positive_surf_vars: tuple[str, ...] = (),
+        positive_atmos_vars: tuple[str, ...] = (),
+        clamp_at_first_step: bool = False,
+        simulate_indexing_bug: bool = False,
+    ) -> None:
+        super().__init__(
+            surf_vars=surf_vars,
+            static_vars=static_vars,
+            atmos_vars=atmos_vars,
+            window_size=window_size,
+            encoder_depths=encoder_depths,
+            encoder_num_heads=encoder_num_heads,
+            decoder_depths=decoder_depths,
+            decoder_num_heads=decoder_num_heads,
+            latent_levels=latent_levels,
+            patch_size=patch_size,
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            drop_path=drop_path,
+            drop_rate=drop_rate,
+            enc_depth=enc_depth,
+            dec_depth=dec_depth,
+            dec_mlp_ratio=dec_mlp_ratio,
+            perceiver_ln_eps=perceiver_ln_eps,
+            max_history_size=max_history_size,
+            timestep=timestep,
+            stabilise_level_agg=stabilise_level_agg,
+            use_lora=use_lora,
+            lora_steps=lora_steps,
+            lora_mode=lora_mode,
+            ffn_type=ffn_type,
+            use_rope_embedding=use_rope_embedding,
+            surf_stats=surf_stats,
+            autocast=autocast,
+            bf16_mode=bf16_mode,
+            level_condition=level_condition,
+            dynamic_vars=dynamic_vars,
+            atmos_static_vars=atmos_static_vars,
+            separate_perceiver=separate_perceiver,
+            modulation_heads=modulation_heads,
+            positive_surf_vars=positive_surf_vars,
+            positive_atmos_vars=positive_atmos_vars,
+            clamp_at_first_step=clamp_at_first_step,
+            simulate_indexing_bug=simulate_indexing_bug,
+        )
+            
+
 
 class AuroraPretrained(Aurora):
     """Pretrained version of Aurora."""
@@ -618,6 +705,39 @@ class AuroraSmallPretrained(Aurora):
 
 AuroraSmall = AuroraSmallPretrained  #: Alias for backwards compatibility
 
+class AuroraMicroPretrained(Aurora):
+    """Micro version of Aurora.
+
+    Should only be used for debugging.
+    """
+
+    default_checkpoint_name = "aurora-0.25-small-pretrained.ckpt"
+    default_checkpoint_revision = "0be7e57c685dac86b78c4a19a3ab149d13c6a3dd"
+
+    def __init__(
+        self,
+        *,
+        encoder_depths: tuple[int, ...] = (2, 6, 2),
+        encoder_num_heads: tuple[int, ...] = (4, 8, 16),
+        decoder_depths: tuple[int, ...] = (2, 6, 2),
+        decoder_num_heads: tuple[int, ...] = (16, 8, 4),
+        embed_dim: int = 128, # 256
+        num_heads: int = 4, # 8
+        use_lora: bool = False,
+        **kw_args,
+    ) -> None:
+        super().__init__(
+            encoder_depths=encoder_depths,
+            encoder_num_heads=encoder_num_heads,
+            decoder_depths=decoder_depths,
+            decoder_num_heads=decoder_num_heads,
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            use_lora=use_lora,
+            **kw_args,
+        )
+
+AuroraMicro = AuroraMicroPretrained  #: Alias for backwards compatibility
 
 class Aurora12hPretrained(Aurora):
     """Pretrained version of Aurora with time step 12 hours."""

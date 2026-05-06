@@ -11,8 +11,6 @@ import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from utils.muon import Muon
-# from utils.model_utils import Muon
-# from torch.optim import AdamW, Muon
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger

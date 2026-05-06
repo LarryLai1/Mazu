@@ -95,7 +95,7 @@ time \
 accelerate launch --config_file ./public_bash_scripts/accelerate_training_config.yaml \
     --num_processes "${GPU_COUNT}" \
     ./train_AuroraSmallTW_otter_test.py \
-    --data_root_dir "/tmp2/yunye0121/era5_tw" \
+    --data_root_dir "/tmp3/yunye0121/era5_tw" \
     --output_dir "${OUTPUT_DIR}" \
     --seed 1126 \
     --train_start_date_hour "2013-01-01 00:00:00" \
