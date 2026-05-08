@@ -19,6 +19,9 @@ from safetensors.torch import load_file
 
 from aurora import Batch, Metadata
 from aurora.model.aurora import AuroraSmall
+from aurora.model.perceiver import MLP as PerceiverMLP
+from aurora.model.swin3d import MLP as SwinMLP, SwiGLUMLP
+from aurora.model.util import init_weights
 
 from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora
 
@@ -111,6 +114,7 @@ def parse_args():
     parser.add_argument("--muon_gradient_accumulation_steps", type = int, default = 4)
     parser.add_argument("--use_swiglu_ffn", action = "store_true")
     parser.add_argument("--use_rope_embedding", action = "store_true")
+    parser.add_argument("--random-mlp", dest = "random_mlp", action = "store_true")
 
     parser.add_argument("--epochs", type = int, default = 5)
     parser.add_argument("--lr", type = float, default = 1e-3)
@@ -132,6 +136,15 @@ def parse_args():
     parser.add_argument("--wandb_name", type = str, default = None)
 
     return parser.parse_args()
+
+def _random_init_mlp_blocks(model):
+    mlp_types = (SwinMLP, SwiGLUMLP, PerceiverMLP)
+    reinit_count = 0
+    for module in model.modules():
+        if isinstance(module, mlp_types):
+            module.apply(init_weights)
+            reinit_count += 1
+    logger.info("Randomly reinitialized %d MLP blocks", reinit_count)
 
 def create_model(
         args,
@@ -155,6 +168,8 @@ def create_model(
         logger.info(f"Loading checkpoint: {args.checkpoint_path}")
         state_dict = load_file(args.checkpoint_path)
         model.load_state_dict(state_dict, strict = False)
+    if args.random_mlp and (args.use_pretrained_weight or args.checkpoint_path):
+        _random_init_mlp_blocks(model)
     return model
 
 def create_dataset(args, split):

@@ -164,7 +164,7 @@ class SwiGLUMLP(nn.Module):
         x = x_proj * F.silu(gate)
         x = self.drop(x)
         x = self.fc2(x)
-        # x = self.drop(x)
+        x = self.drop(x)
         return x
 
 
