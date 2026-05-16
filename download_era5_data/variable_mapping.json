@@ -1,0 +1,56 @@
+{
+  "atmospheric": {
+    "q": {
+      "data_root_var": "q",
+      "forecast_var": "specific_humidity"
+    },
+    "t": {
+      "data_root_var": "t",
+      "forecast_var": "temperature"
+    },
+    "u": {
+      "data_root_var": "u",
+      "forecast_var": "u_component_of_wind"
+    },
+    "v": {
+      "data_root_var": "v",
+      "forecast_var": "v_component_of_wind"
+    },
+    "z": {
+      "data_root_var": "z",
+      "forecast_var": "geopotential"
+    }
+  },
+  "static": {
+    "lsm": {
+      "data_root_var": "lsm",
+      "forecast_var": null
+    },
+    "slt": {
+      "data_root_var": "slt",
+      "forecast_var": null
+    },
+    "z": {
+      "data_root_var": "z",
+      "forecast_var": null
+    }
+  },
+  "surface": {
+    "msl": {
+      "data_root_var": "msl",
+      "forecast_var": "mean_sea_level_pressure"
+    },
+    "t2m": {
+      "data_root_var": "t2m",
+      "forecast_var": "2m_temperature"
+    },
+    "u10": {
+      "data_root_var": "u10",
+      "forecast_var": "10m_u_component_of_wind"
+    },
+    "v10": {
+      "data_root_var": "v10",
+      "forecast_var": "10m_v_component_of_wind"
+    }
+  }
+}

@@ -19,7 +19,6 @@ from safetensors.torch import load_file
 
 from aurora import Batch, Metadata
 from aurora.model.aurora import AuroraSmall
-from aurora.model.perceiver import MLP as PerceiverMLP
 from aurora.model.swin3d import MLP as SwinMLP, SwiGLUMLP
 from aurora.model.util import init_weights
 
@@ -138,7 +137,7 @@ def parse_args():
     return parser.parse_args()
 
 def _random_init_mlp_blocks(model):
-    mlp_types = (SwinMLP, SwiGLUMLP, PerceiverMLP)
+    mlp_types = (SwinMLP, SwiGLUMLP)
     reinit_count = 0
     for module in model.modules():
         if isinstance(module, mlp_types):
