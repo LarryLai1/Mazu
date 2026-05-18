@@ -34,7 +34,7 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --latitude 39.75 5 \
     --longitude 100 144.75 \
     --lead_time 6 \
-    --input_time_window 1 \
+    --input_time_window 6 \
     --rollout_step 1 \
     --save_rollout_step 1 \
     --timestep_hours 6 \

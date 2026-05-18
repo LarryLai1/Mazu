@@ -116,6 +116,7 @@ def create_model(args, device):
     return model
 
 def create_dataset(args):
+    logger.info("Creating Aurora dataset...")
     ds = ERA5TWDatasetforAurora(
         data_root_dir = args.data_root_dir,
         start_date_hour = args.start_date_hour,
@@ -135,6 +136,7 @@ def create_dataset(args):
 def create_boundary_dataset(args):
     if not args.boundary_root_dir:
         return None
+    logger.info("Creating Boundary Condition dataset...")
     return BoundaryConditionDataset(
         boundary_root_dir = args.boundary_root_dir,
         start_date_hour = args.start_date_hour,
@@ -630,7 +632,7 @@ def export_agg_to_csv(
 
 def main():
     args = parse_args()
-    print(args)
+    # print(args)
     set_seed(args.seed)
     logger.info("Running single-GPU evaluation.")
 
