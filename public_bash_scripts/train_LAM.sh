@@ -128,8 +128,9 @@ fi
 time \
 accelerate launch --config_file ./public_bash_scripts/accelerate_training_config.yaml \
     --num_processes "${GPU_COUNT}" \
-    ./train_AuroraSmallTW_otter_test.py \
+    ./train_LAM.py \
     --data_root_dir "/tmp3/yunye0121/era5_tw" \
+    --boundary_root_dir "tmp3/b12902101/era5_tw_forecast\" \
     --output_dir "${OUTPUT_DIR}" \
     --seed 1126 \
     --train_start_date_hour "2016-01-01 00:00:00" \
@@ -155,7 +156,9 @@ accelerate launch --config_file ./public_bash_scripts/accelerate_training_config
     --val_batch_size 8 \
     --num_workers "${GPU_COUNT}"  \
     --checkpointing_epochs 25 \
+    --checkpoint_path "checkpoint-50" \
     --report_to wandb \
+    --boundary_width 1 \
     --tracker_project_name "${PROJECT}" \
     --wandb_name "${NAME}" \
     "${OPTIONAL_ARGS[@]}" \

@@ -7,3 +7,4 @@ __pycache__
 *.safetensors
 Mazu_training_results/*
 my_validation_plots/*
+checkpoint-50/

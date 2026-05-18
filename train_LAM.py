@@ -22,6 +22,7 @@ from aurora.model.aurora import AuroraSmall
 from aurora.model.swin3d import MLP as SwinMLP, SwiGLUMLP
 from aurora.model.util import init_weights
 
+from datasets.BoundaryConditionDataset import BoundaryConditionDataset
 from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora
 
 from utils.metrics import AuroraMAELoss
@@ -84,6 +85,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description = "Aurora Training Script (HF Style)")
 
     parser.add_argument("--data_root_dir", type = str, required = True)
+    parser.add_argument("--boundary_root_dir", type = str, default = None)
     parser.add_argument("--output_dir", type = str, default = "AuroraTW")
     parser.add_argument("--seed", type = int, default = 42)
     parser.add_argument("--use_pretrained_weight", action = "store_true")
@@ -108,6 +110,8 @@ def parse_args():
     parser.add_argument("--lead_time", type = int, default = 0)
     parser.add_argument("--input_time_window", type = int, required = True)
     parser.add_argument("--rollout_step", type = int, required = True)
+    parser.add_argument("--boundary_width", type = int, default = 0)
+    parser.add_argument("--boundary_prediction_timedeltas", type = int, nargs = "+", default = [0, 6, 12])
 
     parser.add_argument("--use_muon", action = "store_true")
     parser.add_argument("--muon_gradient_accumulation_steps", type = int, default = 4)
@@ -206,6 +210,41 @@ def create_dataset(args, split):
         raise Exception("Do not support this dataset split!")
     return ds
 
+
+def create_boundary_dataset(args, split):
+    if not args.boundary_root_dir:
+        return None
+
+    if split == "train":
+        ds = BoundaryConditionDataset(
+            boundary_root_dir = args.boundary_root_dir,
+            start_date_hour = args.train_start_date_hour,
+            end_date_hour = args.train_end_date_hour,
+            upper_variables = args.upper_variables,
+            surface_variables = args.surface_variables,
+            levels = args.levels,
+            latitude = args.latitude,
+            longitude = args.longitude,
+            boundary_width = args.boundary_width,
+            prediction_timedeltas = args.boundary_prediction_timedeltas,
+        )
+    elif split == "val":
+        ds = BoundaryConditionDataset(
+            boundary_root_dir = args.boundary_root_dir,
+            start_date_hour = args.val_start_date_hour,
+            end_date_hour = args.val_end_date_hour,
+            upper_variables = args.upper_variables,
+            surface_variables = args.surface_variables,
+            levels = args.levels,
+            latitude = args.latitude,
+            longitude = args.longitude,
+            boundary_width = args.boundary_width,
+            prediction_timedeltas = args.boundary_prediction_timedeltas,
+        )
+    else:
+        raise Exception("Do not support this dataset split!")
+    return ds
+
 def save_checkpoint_by_epoch(args, accelerator, output_dir, epoch):
     output_dir = Path(output_dir)
 
@@ -257,8 +296,8 @@ def train_epoch(
         args,
         model,
         dataloader,
-    optimizer_bundle,
-    scheduler_bundle,
+        optimizer_bundle,
+        scheduler_bundle,
         criterion,
         accelerator,
         epoch,
@@ -486,6 +525,12 @@ def val_epoch(
 
     return val_epoch_loss, val_global_step
 
+def count_params(model):
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"Total parameters: {total_params:,}")
+    logger.info(f"Trainable parameters: {trainable_params:,}")
+
 def main():
     args = parse_args()
     set_seed(args.seed)
@@ -526,8 +571,15 @@ def main():
     logger.info(accelerator.state)
 
     model = create_model(args)
+    # count_params(model)
+    # count_params(model.encoder)
+    # count_params(model.backbone)
+    # count_params(model.decoder)
+    # exit()
     train_dataset = create_dataset(args, "train")
     val_dataset = create_dataset(args, "val")
+    boundary_train_dataset = create_boundary_dataset(args, "train")
+    boundary_val_dataset = create_boundary_dataset(args, "val")
 
     train_loader = DataLoader(
         train_dataset, batch_size = args.train_batch_size, shuffle = True,
@@ -537,6 +589,26 @@ def main():
         val_dataset, batch_size = args.val_batch_size, shuffle = False,
         num_workers = args.num_workers, pin_memory = True,
     )
+
+    boundary_train_loader = None
+    boundary_val_loader = None
+    if boundary_train_dataset is not None:
+        boundary_train_loader = DataLoader(
+            boundary_train_dataset, batch_size = args.train_batch_size, shuffle = False,
+            num_workers = args.num_workers, pin_memory = True,
+        )
+    if boundary_val_dataset is not None:
+        boundary_val_loader = DataLoader(
+            boundary_val_dataset, batch_size = args.val_batch_size, shuffle = False,
+            num_workers = args.num_workers, pin_memory = True,
+        )
+
+    if boundary_train_loader is not None and boundary_val_loader is not None:
+        logger.info(
+            "Boundary dataloaders enabled: train_batches=%d val_batches=%d",
+            len(boundary_train_loader),
+            len(boundary_val_loader),
+        )
 
     effective_lr = args.lr * args.muon_gradient_accumulation_steps if args.use_muon else args.lr
     muon_params, adamw_params = _split_muon_and_adamw_params(model)

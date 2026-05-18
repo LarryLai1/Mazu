@@ -2,36 +2,44 @@
 # Singe_GPU inference script for AuroraTW weather model.
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=2,3,4,5
 
-MODEL_CKPT_FOLDER="/work/yunye0121/work/yunye0121/MazuTW_training_results/MazuTW_trainwithreplaybufferRAM_st400eps_seed1126_traindt2013010100-2018123123_valdt2022010100-2022123123_lt1_intw1_rs2_th1_epoch100_lr3e-5_trainbs16_valbs16_rbs200_fs1_rss200/ckpts/checkpoint-100"
+MODEL_CKPT_FOLDER="/tmp3/b12902101/Mazu/checkpoint-50"
 MODEL_CKPT_PATH="${MODEL_CKPT_FOLDER}/model.safetensors"
-OUTPUT_FOLDER_NAME="ar_rs168_bs1_dt20230101-20231231_lt1_intw1"
+
+start_time="2016-12-01 00:00:00"
+end_time="2016-12-02 23:00:00"
+OUTPUT_FOLDER_NAME="ar_rs1_bs1_dt20161201-20161202_lt1_intw1"
 
 EXPERIMENT_ID=$(basename "$(dirname "$(dirname "$MODEL_CKPT_FOLDER")")")
 CKPT_NAME=$(basename "$MODEL_CKPT_FOLDER")
 LOG_FILE="./bash_outputs/${EXPERIMENT_ID}_${CKPT_NAME}.log"
 
+touch "${LOG_FILE}"
+
 time \
 python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
-    --data_root_dir /home/yunye0121/era5_tw \
+    --data_root_dir /tmp3/yunye0121/era5_tw \
+    --boundary_root_dir /tmp3/b12902101/era5_tw_forecast \
     --checkpoint_path "${MODEL_CKPT_PATH}" \
-    --batch_size 1 \
+    --batch_size 8 \
     --num_workers 4 \
     --seed 1126 \
-    --start_date_hour "2023-01-01 00:00:00" \
-    --end_date_hour "2023-12-31 23:00:00" \
+    --start_date_hour "${start_time}" \
+    --end_date_hour "${end_time}" \
     --surface_variables t2m u10 v10 msl \
     --upper_variables u v t q z \
     --static_variables lsm slt z \
     --levels 1000 925 850 700 500 300 150 50 \
     --latitude 39.75 5 \
     --longitude 100 144.75 \
-    --lead_time 1 \
+    --lead_time 6 \
     --input_time_window 1 \
-    --rollout_step 168 \
-    --save_rollout_step 6 24 96 168 \
-    --timestep_hours 1 \
+    --rollout_step 1 \
+    --save_rollout_step 1 \
+    --timestep_hours 6 \
+    --boundary_width 1 \
+    --boundary_mode "inject-inside" \
     --mixed_precision 'no' \
     --eval_metric MSE MAE \
     --gen_result_folder "${MODEL_CKPT_FOLDER}/${OUTPUT_FOLDER_NAME}/preds" \
