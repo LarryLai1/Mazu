@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 import random
 import numpy as np
+import sys
 
 from aurora import Batch, Metadata
 # from aurora import rollout
@@ -52,6 +53,12 @@ def parse_args():
         type = int,
         nargs = "+",
         default = [0, 6, 12],
+    )
+    parser.add_argument(
+        "--boundary_pooling",
+        type = str,
+        default = "no",
+        choices = ["no", "yes"],
     )
     parser.add_argument("--use_pretrained_weight", action = "store_true")
     # parser.add_argument('--checkpoint_path', type = str, required = True)
@@ -130,6 +137,7 @@ def create_dataset(args):
         lead_time = args.lead_time,
         input_time_window = args.input_time_window,
         rollout_step = args.rollout_step,
+        sample_stride_hours=args.timestep_hours,  # Align dataset sampling with model rollout timestep
     )
     return ds
 
@@ -137,6 +145,7 @@ def create_boundary_dataset(args):
     if not args.boundary_root_dir:
         return None
     logger.info("Creating Boundary Condition dataset...")
+    boundary_ds_width = args.boundary_width if args.boundary_mode == "pad-outside" else 0
     return BoundaryConditionDataset(
         boundary_root_dir = args.boundary_root_dir,
         start_date_hour = args.start_date_hour,
@@ -146,8 +155,9 @@ def create_boundary_dataset(args):
         levels = args.levels,
         latitude = args.latitude,
         longitude = args.longitude,
-        boundary_width = args.boundary_width,
+        boundary_width = boundary_ds_width,
         prediction_timedeltas = args.boundary_prediction_timedeltas,
+        enable_pooling = (args.boundary_pooling == "yes"),
     )
 
 def log_weather_variable_error_with_lead_time(loss_dict, t, lead_time_agg):
@@ -168,69 +178,43 @@ def slice_timeaxis(labels):
                 n_g[i][var_type][var_name] = tensor[:, i : i + 1]
     return n_g
 
-def _build_boundary_time_index(boundary_dataset):
-    return {pd.Timestamp(t): i for i, t in enumerate(boundary_dataset.time_axis)}
-
-def _select_boundary_frame(
-    boundary_dataset,
-    boundary_time_index,
-    target_time,
-    prefer_leads = (6, 12, 0),
-    force_lead = None,
-):
-    target_time = pd.Timestamp(target_time)
-    if force_lead is not None:
-        lead = int(force_lead)
-        init_time = target_time - pd.Timedelta(hours = lead)
-        index = boundary_time_index.get(init_time)
-        if index is None or lead not in boundary_dataset.prediction_timedelta_hours:
-            return None
-        data = boundary_dataset[index]
-        lead_idx = boundary_dataset.prediction_timedelta_hours.index(lead)
-        return data, lead_idx
-
-    for lead in prefer_leads:
-        init_time = target_time - pd.Timedelta(hours = lead)
-        index = boundary_time_index.get(init_time)
-        if index is None:
-            continue
-        if lead not in boundary_dataset.prediction_timedelta_hours:
-            continue
-        data = boundary_dataset[index]
-        lead_idx = boundary_dataset.prediction_timedelta_hours.index(lead)
-        return data, lead_idx
-    return None
-
 def _build_boundary_batch(
     boundary_dataset,
-    boundary_time_index,
+    base_times,
     target_times,
-    prefer_leads = (6, 12, 0),
-    force_lead = None,
 ):
     surf_vars = {}
     atmos_vars = {}
 
-    for target_time in target_times:
-        selection = _select_boundary_frame(
-            boundary_dataset,
-            boundary_time_index,
-            target_time,
-            prefer_leads = prefer_leads,
-            force_lead = force_lead,
-        )
-        if selection is None:
-            raise ValueError(f"No boundary data found for target time {target_time}.")
-        data, lead_idx = selection
-
+    for base_time, target_time in zip(base_times, target_times):
+        data = boundary_dataset.get_boundary_at_time(base_time, target_time)
         for var_name, tensor in data["surf_vars"].items():
-            surf_vars.setdefault(var_name, []).append(tensor[lead_idx])
+            surf_vars.setdefault(var_name, []).append(tensor)
         for var_name, tensor in data["atmos_vars"].items():
-            atmos_vars.setdefault(var_name, []).append(tensor[lead_idx])
+            atmos_vars.setdefault(var_name, []).append(tensor)
 
     surf_vars = {k: torch.stack(v, dim = 0) for k, v in surf_vars.items()}
     atmos_vars = {k: torch.stack(v, dim = 0) for k, v in atmos_vars.items()}
     return {"surf_vars": surf_vars, "atmos_vars": atmos_vars}
+
+def _is_increasing(coord: torch.Tensor) -> bool:
+    if coord.numel() < 2:
+        return False
+    return coord[0].item() < coord[-1].item()
+
+def _align_boundary_batch(boundary_batch, flip_lat: bool, flip_lon: bool):
+    if not (flip_lat or flip_lon):
+        return boundary_batch
+    lat_dim = -2
+    lon_dim = -1
+    for var_dict in (boundary_batch["surf_vars"], boundary_batch["atmos_vars"]):
+        for k, tensor in var_dict.items():
+            if flip_lat:
+                tensor = torch.flip(tensor, dims = (lat_dim,))
+            if flip_lon:
+                tensor = torch.flip(tensor, dims = (lon_dim,))
+            var_dict[k] = tensor
+    return boundary_batch
 
 def _center_crop_boundary(tensor, boundary_width):
     if boundary_width <= 0:
@@ -253,16 +237,34 @@ def _pad_static_vars(static_vars, boundary_width):
         return static_vars
     padded = {}
     for var_name, tensor in static_vars.items():
-        padded[var_name] = F.pad(
-            tensor,
-            (boundary_width, boundary_width, boundary_width, boundary_width),
-            mode = "replicate",
-        )
+        if tensor.dim() == 2:
+            padded_tensor = F.pad(
+                tensor.unsqueeze(0).unsqueeze(0),
+                (boundary_width, boundary_width, boundary_width, boundary_width),
+                mode = "replicate",
+            ).squeeze(0).squeeze(0)
+        elif tensor.dim() == 3:
+            padded_tensor = F.pad(
+                tensor.unsqueeze(0),
+                (boundary_width, boundary_width, boundary_width, boundary_width),
+                mode = "replicate",
+            ).squeeze(0)
+        else:
+            padded_tensor = F.pad(
+                tensor,
+                (boundary_width, boundary_width, boundary_width, boundary_width),
+                mode = "replicate",
+            )
+        padded[var_name] = padded_tensor
     return padded
 
 def _replace_boundary_inside(pred_tensor, boundary_tensor, boundary_width):
     if boundary_width <= 0:
         return pred_tensor
+    if pred_tensor.dim() == boundary_tensor.dim() + 1:
+        boundary_tensor = boundary_tensor.unsqueeze(1)
+    if pred_tensor.dim() != boundary_tensor.dim():
+        raise ValueError("Boundary tensor rank does not match prediction tensor.")
     updated = pred_tensor.clone()
     bw = boundary_width
     updated[..., :bw, :] = boundary_tensor[..., :bw, :]
@@ -351,12 +353,18 @@ def evaluate(
     static_data = dataloader.dataset.get_static_vars_ds()
 
     boundary_enabled = boundary_dataset is not None and args.boundary_width > 0
-    boundary_time_index = _build_boundary_time_index(boundary_dataset) if boundary_enabled else None
 
-    if boundary_enabled and args.boundary_mode == "pad-outside":
+    if boundary_enabled:
         boundary_latitudes, boundary_longitude = boundary_dataset.get_latitude_longitude()
+        flip_lat = _is_increasing(boundary_latitudes) != _is_increasing(latitudes)
+        flip_lon = _is_increasing(boundary_longitude) != _is_increasing(longitude)
+        if flip_lat:
+            boundary_latitudes = torch.flip(boundary_latitudes, dims = (0,))
+        if flip_lon:
+            boundary_longitude = torch.flip(boundary_longitude, dims = (0,))
     else:
-        boundary_latitudes, boundary_longitude = None, None
+        flip_lat = False
+        flip_lon = False
 
     # Optimization: Use inference_mode to reduce memory for gradients
     with torch.inference_mode():
@@ -378,17 +386,21 @@ def evaluate(
             _label_list = slice_timeaxis(labels)
 
             batch_times = tuple(map(lambda d: pd.Timestamp(d), dates))
+            base_times = None
+            if boundary_enabled:
+                base_times = tuple(boundary_dataset.get_base_time(t) for t in batch_times)
 
             if boundary_enabled and args.boundary_mode == "pad-outside":
                 boundary_init = _build_boundary_batch(
                     boundary_dataset,
-                    boundary_time_index,
+                    base_times,
                     batch_times,
                 )
                 for var_name, tensor in boundary_init["surf_vars"].items():
                     boundary_init["surf_vars"][var_name] = tensor.to(device)
                 for var_name, tensor in boundary_init["atmos_vars"].items():
                     boundary_init["atmos_vars"][var_name] = tensor.to(device)
+                boundary_init = _align_boundary_batch(boundary_init, flip_lat, flip_lon)
 
                 padded_inputs = {"surf_vars": {}, "atmos_vars": {}}
                 for var_name, tensor in inputs["surf_vars"].items():
@@ -410,6 +422,40 @@ def evaluate(
                 inputs = padded_inputs
                 static_data["static_vars"] = _pad_static_vars(static_data["static_vars"], args.boundary_width)
 
+            # ================== 新增修改：針對 inject-inside 模式進行初始輸入覆寫 ==================
+            elif boundary_enabled and args.boundary_mode == "inject-inside":
+                # 取得初始時間點的真實邊界
+                boundary_init = _build_boundary_batch(
+                    boundary_dataset,
+                    base_times,
+                    batch_times,
+                )
+                boundary_init = _align_boundary_batch(boundary_init, flip_lat, flip_lon)
+                
+                # 直接將真實邊界搬移至 GPU（inject-inside 需與輸入同空間尺寸）
+                boundary_inside = {
+                    "surf_vars": {
+                        k: v.to(device)
+                        for k, v in boundary_init["surf_vars"].items()
+                    },
+                    "atmos_vars": {
+                        k: v.to(device)
+                        for k, v in boundary_init["atmos_vars"].items()
+                    },
+                }
+                
+                # 直接覆寫初始 inputs 裡面所有歷史時間步的四周邊界
+                for var_name, tensor in inputs["surf_vars"].items():
+                    # 配合 inputs 的維度 (Batch, Time, Lat, Lon)，將邊界張量增加 Time 維度並對齊
+                    b_tensor = boundary_inside["surf_vars"][var_name].unsqueeze(1).expand(-1, tensor.shape[1], -1, -1)
+                    inputs["surf_vars"][var_name] = _replace_boundary_inside(tensor, b_tensor, args.boundary_width)
+                    
+                for var_name, tensor in inputs["atmos_vars"].items():
+                    # 配合 inputs 的維度 (Batch, Time, Level, Lat, Lon)，將邊界張量增加 Time 維度並對齊
+                    b_tensor = boundary_inside["atmos_vars"][var_name].unsqueeze(1).expand(-1, tensor.shape[1], -1, -1, -1)
+                    inputs["atmos_vars"][var_name] = _replace_boundary_inside(tensor, b_tensor, args.boundary_width)
+            # ===================================================================================
+
             if boundary_enabled and args.boundary_mode == "pad-outside":
                 metadata_lat = boundary_latitudes
                 metadata_lon = boundary_longitude
@@ -428,6 +474,10 @@ def evaluate(
                     atmos_levels = levels,
                 ),
             )
+            # logger.info("Input shape: %s", _input.atmos_vars["t"].shape)
+            # # flush stdout
+            # sys.stdout.flush()
+            
 
             assert model.training is False
 
@@ -442,7 +492,7 @@ def evaluate(
 
             # --- THE OPTIMIZED LOOP ---
             # We create a dummy context manager if AMP is not used
-            context_manager = torch.cuda.amp.autocast(dtype = dtype) if use_amp else contextlib.nullcontext()
+            context_manager = torch.amp.autocast(dtype = dtype) if use_amp else contextlib.nullcontext()
             
             with context_manager:
                 rollout_batch = _prepare_batch_for_rollout(model, _input)
@@ -477,17 +527,18 @@ def evaluate(
                         target_times = tuple(
                             pd.Timestamp(d) + pd.Timedelta(hours = t * args.lead_time) for d in dates
                         )
-                        print(dates)
-                        print(target_times)
+                        # print(dates)
+                        # print(target_times)
                         boundary_step = _build_boundary_batch(
                             boundary_dataset,
-                            boundary_time_index,
+                            base_times,
                             target_times,
                         )
                         for var_name, tensor in boundary_step["surf_vars"].items():
                             boundary_step["surf_vars"][var_name] = tensor.to(device, dtype = _pred.surf_vars[var_name].dtype)
                         for var_name, tensor in boundary_step["atmos_vars"].items():
                             boundary_step["atmos_vars"][var_name] = tensor.to(device, dtype = _pred.atmos_vars[var_name].dtype)
+                        boundary_step = _align_boundary_batch(boundary_step, flip_lat, flip_lon)
                     else:
                         boundary_step = None
 
@@ -533,11 +584,11 @@ def evaluate(
                         if args.boundary_mode == "inject-inside":
                             boundary_inside = {
                                 "surf_vars": {
-                                    k: _center_crop_boundary(v, args.boundary_width)
+                                    k: v
                                     for k, v in boundary_step["surf_vars"].items()
                                 },
                                 "atmos_vars": {
-                                    k: _center_crop_boundary(v, args.boundary_width)
+                                    k: v
                                     for k, v in boundary_step["atmos_vars"].items()
                                 },
                             }

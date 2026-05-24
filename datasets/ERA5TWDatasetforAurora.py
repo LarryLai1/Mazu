@@ -20,6 +20,7 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
         input_time_window: int = 2,
         rollout_step: int = 1,
         get_datetime: bool = True,
+        sample_stride_hours: int = 1,
     ) -> None:
         super().__init__()
         self.data_root_dir = data_root_dir
@@ -35,6 +36,7 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
         self.latitude = latitude
         self.longitude = longitude
         self.get_datetime = get_datetime
+        self.sample_stride_hours = sample_stride_hours
 
     def map_var_name_for_Aurora(self, var_name: str) -> str:
         var_name_mapping = {
@@ -95,7 +97,8 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
     def __len__(self) -> int:
         duration = self.end_date_hour - self.start_date_hour
         duration_hours = round(duration.total_seconds()) // (60 * 60)
-        return duration_hours - (self.input_time_window - 1 + self.rollout_step) * self.lead_time + 1
+        available_hours = duration_hours - (self.input_time_window - 1 + self.rollout_step) * self.lead_time
+        return available_hours // self.sample_stride_hours + 1
 
     def _nc_to_dict(self, upper_nc, sfc_nc) -> dict:
         _d = {
@@ -135,7 +138,7 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
 
     def __getitem__(self, index: int) -> tuple:
         date_hour_inputs = [
-            self.start_date_hour + pd.Timedelta(hours = index + i * self.lead_time) \
+            self.start_date_hour + pd.Timedelta(hours = index * self.sample_stride_hours + i * self.lead_time) \
             for i in range(self.input_time_window)
         ]
         date_hour_outputs = [
@@ -178,7 +181,7 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
 
         # last input time list
         last_input_times = [
-            self.start_date_hour + pd.Timedelta(hours=last_index + i * self.lead_time)
+            self.start_date_hour + pd.Timedelta(hours=last_index * self.sample_stride_hours + i * self.lead_time)
             for i in range(self.input_time_window)
         ]
 

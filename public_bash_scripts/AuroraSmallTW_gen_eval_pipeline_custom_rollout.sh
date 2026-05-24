@@ -2,14 +2,59 @@
 # Singe_GPU inference script for AuroraTW weather model.
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=2,3,4,5
+
+usage() {
+    echo "Usage: $0 [--gpus GPU_IDS] [--boundary_width N] [--boundary_mode MODE]" >&2
+    echo "  --gpus GPU_IDS           CUDA_VISIBLE_DEVICES value (default: 3,4,5)" >&2
+    echo "  --boundary_width N       Boundary width (default: 2)" >&2
+    echo "  --boundary_mode MODE     Boundary mode (default: inject-inside)" >&2
+    echo "  --boundary_pooling MODE  Boundary pooling then reshape (default: no)" >&2
+}
+
+CUDA_VISIBLE_DEVICES_VALUE="3,4,5"
+boundary_width=2
+boundary_mode="inject-inside"
+# boundary_pooling="yes"
+boundary_pooling="no"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --gpus)
+            CUDA_VISIBLE_DEVICES_VALUE="$2"
+            shift 2
+            ;;
+        --boundary_width)
+            boundary_width="$2"
+            shift 2
+            ;;
+        --boundary_mode)
+            boundary_mode="$2"
+            shift 2
+            ;;
+        --boundary_pooling)
+            boundary_pooling="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 
 MODEL_CKPT_FOLDER="/tmp3/b12902101/Mazu/checkpoint-50"
 MODEL_CKPT_PATH="${MODEL_CKPT_FOLDER}/model.safetensors"
 
-start_time="2016-12-01 00:00:00"
-end_time="2016-12-02 23:00:00"
-OUTPUT_FOLDER_NAME="ar_rs1_bs1_dt20161201-20161202_lt1_intw1"
+start_time="2020-07-01 00:00:00"
+end_time="2016-08-31 23:00:00"
+OUTPUT_FOLDER_NAME="${start_time:0:10}_${end_time:0:10}_boundary${boundary_width}_${boundary_mode}_pooling${boundary_pooling}"
 
 EXPERIMENT_ID=$(basename "$(dirname "$(dirname "$MODEL_CKPT_FOLDER")")")
 CKPT_NAME=$(basename "$MODEL_CKPT_FOLDER")
@@ -20,7 +65,7 @@ touch "${LOG_FILE}"
 time \
 python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --data_root_dir /tmp3/yunye0121/era5_tw \
-    --boundary_root_dir /tmp3/b12902101/era5_tw_forecast \
+    --boundary_root_dir /tmp3/b12902101/earth2/outputs \
     --checkpoint_path "${MODEL_CKPT_PATH}" \
     --batch_size 8 \
     --num_workers 4 \
@@ -33,13 +78,13 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --levels 1000 925 850 700 500 300 150 50 \
     --latitude 39.75 5 \
     --longitude 100 144.75 \
-    --lead_time 6 \
-    --input_time_window 6 \
-    --rollout_step 1 \
-    --save_rollout_step 1 \
-    --timestep_hours 6 \
-    --boundary_width 1 \
-    --boundary_mode "inject-inside" \
+    --lead_time 1 \
+    --input_time_window 1 \
+    --rollout_step 12 \
+    --timestep_hours 1 \
+    --boundary_width ${boundary_width} \
+    --boundary_mode ${boundary_mode} \
+    --boundary_pooling ${boundary_pooling} \
     --mixed_precision 'no' \
     --eval_metric MSE MAE \
     --gen_result_folder "${MODEL_CKPT_FOLDER}/${OUTPUT_FOLDER_NAME}/preds" \
