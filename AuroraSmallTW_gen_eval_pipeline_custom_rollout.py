@@ -68,6 +68,11 @@ def parse_args():
         action = "store_true",
         help = "Preload all boundary files into memory and serve boundary data from cache.",
     )
+    parser.add_argument(
+        "--gpu_cache",
+        action = "store_true",
+        help = "Enable GPU boundary cache and preload boundary files into memory.",
+    )
     parser.add_argument("--use_pretrained_weight", action = "store_true")
     # parser.add_argument('--checkpoint_path', type = str, required = True)
     parser.add_argument('--checkpoint_path', type = str, default = None)
@@ -287,6 +292,50 @@ def _build_boundary_batch(
     atmos_vars = {k: torch.stack(v, dim = 0) for k, v in atmos_vars.items()}
     return {"surf_vars": surf_vars, "atmos_vars": atmos_vars}
 
+def _get_boundary_source_on_device(
+    boundary_dataset,
+    base_time,
+    gpu_cache,
+    device,
+):
+    if base_time in gpu_cache:
+        return gpu_cache[base_time]
+    source = boundary_dataset.get_boundary_source(base_time)
+    gpu_source = {
+        "time_values": source["time_values"],
+        "surf_vars": {},
+        "atmos_vars": {},
+    }
+    for var_name, tensor in source["surf_vars"].items():
+        gpu_source["surf_vars"][var_name] = tensor.to(device)
+    for var_name, tensor in source["atmos_vars"].items():
+        gpu_source["atmos_vars"][var_name] = tensor.to(device)
+    gpu_cache[base_time] = gpu_source
+    return gpu_source
+
+def _build_boundary_batch_from_gpu_cache(
+    boundary_dataset,
+    gpu_cache,
+    base_times,
+    target_times,
+):
+    surf_vars = {}
+    atmos_vars = {}
+
+    for base_time, target_time in zip(base_times, target_times):
+        source = gpu_cache[base_time]
+        time_values = source["time_values"]
+        for var_name, tensor in source["surf_vars"].items():
+            selected = boundary_dataset._select_from_source(time_values, tensor, target_time)
+            surf_vars.setdefault(var_name, []).append(selected)
+        for var_name, tensor in source["atmos_vars"].items():
+            selected = boundary_dataset._select_from_source(time_values, tensor, target_time)
+            atmos_vars.setdefault(var_name, []).append(selected)
+
+    surf_vars = {k: torch.stack(v, dim = 0) for k, v in surf_vars.items()}
+    atmos_vars = {k: torch.stack(v, dim = 0) for k, v in atmos_vars.items()}
+    return {"surf_vars": surf_vars, "atmos_vars": atmos_vars}
+
 def _is_increasing(coord: torch.Tensor) -> bool:
     if coord.numel() < 2:
         return False
@@ -446,6 +495,7 @@ def evaluate(
     static_data = ds_ref.get_static_vars_ds()
 
     boundary_enabled = boundary_dataset is not None and args.boundary_width > 0
+    gpu_boundary_cache = {}
 
     if boundary_enabled:
         boundary_latitudes, boundary_longitude = boundary_dataset.get_latitude_longitude()
@@ -487,17 +537,43 @@ def evaluate(
             prefetched_boundary = None
             if boundary_enabled:
                 prefetched_boundary = {}
-                # include initial step k=0 (current time) and future steps 1..rollout_step
-                for k in range(0, args.rollout_step + 1):
-                    target_times_k = tuple(pd.Timestamp(d) + pd.Timedelta(hours = k * args.lead_time) for d in dates)
-                    b_step = _build_boundary_batch(boundary_dataset, base_times, target_times_k)
-                    b_step = _align_boundary_batch(b_step, flip_lat, flip_lon)
-                    # Move to device (keep as float/dtype default) to avoid host->device during rollout
-                    for var_name, tensor in b_step["surf_vars"].items():
-                        b_step["surf_vars"][var_name] = tensor.to(device)
-                    for var_name, tensor in b_step["atmos_vars"].items():
-                        b_step["atmos_vars"][var_name] = tensor.to(device)
-                    prefetched_boundary[k] = b_step
+                if args.gpu_cache:
+                    for base_time in set(base_times):
+                        _get_boundary_source_on_device(
+                            boundary_dataset,
+                            base_time,
+                            gpu_boundary_cache,
+                            device,
+                        )
+                    # include initial step k=0 (current time) and future steps 1..rollout_step
+                    for k in range(0, args.rollout_step + 1):
+                        target_times_k = tuple(
+                            pd.Timestamp(d) + pd.Timedelta(hours = k * args.lead_time)
+                            for d in dates
+                        )
+                        b_step = _build_boundary_batch_from_gpu_cache(
+                            boundary_dataset,
+                            gpu_boundary_cache,
+                            base_times,
+                            target_times_k,
+                        )
+                        b_step = _align_boundary_batch(b_step, flip_lat, flip_lon)
+                        prefetched_boundary[k] = b_step
+                else:
+                    # include initial step k=0 (current time) and future steps 1..rollout_step
+                    for k in range(0, args.rollout_step + 1):
+                        target_times_k = tuple(
+                            pd.Timestamp(d) + pd.Timedelta(hours = k * args.lead_time)
+                            for d in dates
+                        )
+                        b_step = _build_boundary_batch(boundary_dataset, base_times, target_times_k)
+                        b_step = _align_boundary_batch(b_step, flip_lat, flip_lon)
+                        # Move to device (keep as float/dtype default) to avoid host->device during rollout
+                        for var_name, tensor in b_step["surf_vars"].items():
+                            b_step["surf_vars"][var_name] = tensor.to(device)
+                        for var_name, tensor in b_step["atmos_vars"].items():
+                            b_step["atmos_vars"][var_name] = tensor.to(device)
+                        prefetched_boundary[k] = b_step
 
             if boundary_enabled and args.boundary_mode == "pad-outside":
                 # use prefetched boundary for initial pad-outside

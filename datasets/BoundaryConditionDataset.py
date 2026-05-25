@@ -289,6 +289,12 @@ class BoundaryConditionDataset(torch.utils.data.Dataset):
         target_time = pd.Timestamp(target_time)
         return target_time.floor(f"{self.forecast_cycle_hours}h")
 
+    def get_boundary_source(self, base_time: pd.Timestamp) -> dict:
+        base_time = pd.Timestamp(base_time)
+        if self.use_cache:
+            return self._cache[base_time]
+        return self._load_boundary_source_from_files(base_time)
+
     def get_boundary_at_time(
         self,
         base_time: pd.Timestamp,

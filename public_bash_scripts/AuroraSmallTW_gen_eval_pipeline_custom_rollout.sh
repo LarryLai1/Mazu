@@ -93,6 +93,7 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --boundary_mode ${boundary_mode} \
     --boundary_pooling ${boundary_pooling} \
     ${boundary_use_cache} \
+    --gpu_cache
     --mixed_precision 'no' \
     --eval_metric MSE MAE \
     --csv_output_folder "${MODEL_CKPT_FOLDER}/${OUTPUT_FOLDER_NAME}/errs" \
