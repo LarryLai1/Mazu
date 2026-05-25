@@ -4,14 +4,17 @@
 import argparse
 import contextlib
 import dataclasses
+import json
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+import torch.multiprocessing as mp
+from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 import random
 import numpy as np
 import sys
+import os
 
 from aurora import Batch, Metadata
 # from aurora import rollout
@@ -60,6 +63,11 @@ def parse_args():
         default = "no",
         choices = ["no", "yes"],
     )
+    parser.add_argument(
+        "--boundary_use_cache",
+        action = "store_true",
+        help = "Preload all boundary files into memory and serve boundary data from cache.",
+    )
     parser.add_argument("--use_pretrained_weight", action = "store_true")
     # parser.add_argument('--checkpoint_path', type = str, required = True)
     parser.add_argument('--checkpoint_path', type = str, default = None)
@@ -89,8 +97,89 @@ def parse_args():
 
     parser.add_argument("--csv_output_folder", type = str, default = "./errs")
     parser.add_argument('--mixed_precision', type = str, default = None, choices = ["no", "fp16", "bf16"])
+    parser.add_argument('--mp_world_size', type = int, default = 1)
+    parser.add_argument(
+        '--gpus',
+        type = str,
+        default = None,
+        help = 'Comma-separated list of GPU ids to use, e.g. "0,1,2". If provided, spawns one process per GPU and binds each process to the corresponding GPU.',
+    )
 
     return parser.parse_args()
+
+def _resolve_mp_world_size(args):
+    # If user explicitly provided GPU ids, use that
+    if getattr(args, 'gpus', None):
+        gpus = [x for x in args.gpus.split(",") if x.strip() != ""]
+        return max(1, len(gpus))
+    if args.mp_world_size > 1:
+        return args.mp_world_size
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if visible:
+        n = len([x for x in visible.split(",") if x.strip() != ""])
+        return max(1, n)
+    if torch.cuda.is_available():
+        return max(1, torch.cuda.device_count())
+    return 1
+
+def _manual_split_dataset(dataset, rank: int, world_size: int):
+    if world_size <= 1:
+        return dataset
+    indices = list(range(rank, len(dataset), world_size))
+    return Subset(dataset, indices)
+
+def _build_metric_lists(args):
+    criterion_list = []
+    err_agg_list = []
+    for metric in args.eval_metric:
+        if metric == "MSE":
+            criterion_list.append(AuroraMSELoss)
+        elif metric == "MAE":
+            criterion_list.append(AuroraMAELoss)
+        else:
+            raise Exception(f"Unsupported eval metric: {metric}")
+
+        err_agg_list.append(
+            prepare_each_lead_time_agg(
+                rollout_step = args.rollout_step,
+                lead_time = args.lead_time,
+                surface_variables = args.surface_variables,
+                upper_variables = args.upper_variables,
+                levels = args.levels,
+                err_type = metric,
+            )
+        )
+    return criterion_list, err_agg_list
+
+def _err_agg_to_state(err_agg):
+    state = {}
+    for t, t_dict in err_agg.items():
+        state[str(t)] = {"surf_vars": {}, "atmos_vars": {}}
+        for var, agg in t_dict["surf_vars"].items():
+            state[str(t)]["surf_vars"][var] = {
+                "error_sum": float(agg.error_sum),
+                "count": int(agg.count),
+            }
+        for var, lev_dict in t_dict["atmos_vars"].items():
+            state[str(t)]["atmos_vars"][var] = {}
+            for lev, agg in lev_dict.items():
+                state[str(t)]["atmos_vars"][var][str(lev)] = {
+                    "error_sum": float(agg.error_sum),
+                    "count": int(agg.count),
+                }
+    return state
+
+def _merge_state_into_err_agg(err_agg, state):
+    for t, t_dict in state.items():
+        ti = int(t)
+        for var, s in t_dict["surf_vars"].items():
+            err_agg[ti]["surf_vars"][var].error_sum += float(s["error_sum"])
+            err_agg[ti]["surf_vars"][var].count += int(s["count"])
+        for var, lev_dict in t_dict["atmos_vars"].items():
+            for lev, s in lev_dict.items():
+                li = int(lev)
+                err_agg[ti]["atmos_vars"][var][li].error_sum += float(s["error_sum"])
+                err_agg[ti]["atmos_vars"][var][li].count += int(s["count"])
 
 def load_Aurora_weight(
     Aurora_model,
@@ -158,6 +247,7 @@ def create_boundary_dataset(args):
         boundary_width = boundary_ds_width,
         prediction_timedeltas = args.boundary_prediction_timedeltas,
         enable_pooling = (args.boundary_pooling == "yes"),
+        use_cache = args.boundary_use_cache,
     )
 
 def log_weather_variable_error_with_lead_time(loss_dict, t, lead_time_agg):
@@ -346,11 +436,14 @@ def evaluate(
     err_agg_list,
     device,
     boundary_dataset = None,
+    rank = 0,
+    metadata_dataset = None,
 ):
     model.eval()
-    latitudes, longitude = dataloader.dataset.get_latitude_longitude()
-    levels = dataloader.dataset.get_levels()
-    static_data = dataloader.dataset.get_static_vars_ds()
+    ds_ref = metadata_dataset if metadata_dataset is not None else dataloader.dataset
+    latitudes, longitude = ds_ref.get_latitude_longitude()
+    levels = ds_ref.get_levels()
+    static_data = ds_ref.get_static_vars_ds()
 
     boundary_enabled = boundary_dataset is not None and args.boundary_width > 0
 
@@ -368,7 +461,7 @@ def evaluate(
 
     # Optimization: Use inference_mode to reduce memory for gradients
     with torch.inference_mode():
-        for batch in tqdm(dataloader, desc="Evaluating"):
+        for batch in tqdm(dataloader, desc = f"Evaluating(rank={rank})", disable = (rank != 0)):
             inputs, labels, dates = batch
             
             # --- Data moving to device ---
@@ -390,17 +483,29 @@ def evaluate(
             if boundary_enabled:
                 base_times = tuple(boundary_dataset.get_base_time(t) for t in batch_times)
 
+            # Prefetch boundary data for all autoregressive steps and transfer to device
+            prefetched_boundary = None
+            if boundary_enabled:
+                prefetched_boundary = {}
+                # include initial step k=0 (current time) and future steps 1..rollout_step
+                for k in range(0, args.rollout_step + 1):
+                    target_times_k = tuple(pd.Timestamp(d) + pd.Timedelta(hours = k * args.lead_time) for d in dates)
+                    b_step = _build_boundary_batch(boundary_dataset, base_times, target_times_k)
+                    b_step = _align_boundary_batch(b_step, flip_lat, flip_lon)
+                    # Move to device (keep as float/dtype default) to avoid host->device during rollout
+                    for var_name, tensor in b_step["surf_vars"].items():
+                        b_step["surf_vars"][var_name] = tensor.to(device)
+                    for var_name, tensor in b_step["atmos_vars"].items():
+                        b_step["atmos_vars"][var_name] = tensor.to(device)
+                    prefetched_boundary[k] = b_step
+
             if boundary_enabled and args.boundary_mode == "pad-outside":
-                boundary_init = _build_boundary_batch(
+                # use prefetched boundary for initial pad-outside
+                boundary_init = prefetched_boundary[0] if prefetched_boundary is not None else _build_boundary_batch(
                     boundary_dataset,
                     base_times,
                     batch_times,
                 )
-                for var_name, tensor in boundary_init["surf_vars"].items():
-                    boundary_init["surf_vars"][var_name] = tensor.to(device)
-                for var_name, tensor in boundary_init["atmos_vars"].items():
-                    boundary_init["atmos_vars"][var_name] = tensor.to(device)
-                boundary_init = _align_boundary_batch(boundary_init, flip_lat, flip_lon)
 
                 padded_inputs = {"surf_vars": {}, "atmos_vars": {}}
                 for var_name, tensor in inputs["surf_vars"].items():
@@ -424,22 +529,22 @@ def evaluate(
 
             # ================== 新增修改：針對 inject-inside 模式進行初始輸入覆寫 ==================
             elif boundary_enabled and args.boundary_mode == "inject-inside":
-                # 取得初始時間點的真實邊界
-                boundary_init = _build_boundary_batch(
+                # 取得初始時間點的真實邊界（從 prefetched 取得，已在 device）
+                boundary_init = prefetched_boundary[0] if prefetched_boundary is not None else _build_boundary_batch(
                     boundary_dataset,
                     base_times,
                     batch_times,
                 )
                 boundary_init = _align_boundary_batch(boundary_init, flip_lat, flip_lon)
-                
-                # 直接將真實邊界搬移至 GPU（inject-inside 需與輸入同空間尺寸）
+
+                # boundary_init 已被移到 device during prefetch; use directly
                 boundary_inside = {
                     "surf_vars": {
-                        k: v.to(device)
+                        k: v
                         for k, v in boundary_init["surf_vars"].items()
                     },
                     "atmos_vars": {
-                        k: v.to(device)
+                        k: v
                         for k, v in boundary_init["atmos_vars"].items()
                     },
                 }
@@ -529,7 +634,8 @@ def evaluate(
                         )
                         # print(dates)
                         # print(target_times)
-                        boundary_step = _build_boundary_batch(
+                        # use prefetched per-step boundary (already on device); cast to pred dtype as needed
+                        boundary_step = prefetched_boundary[t] if prefetched_boundary is not None else _build_boundary_batch(
                             boundary_dataset,
                             base_times,
                             target_times,
@@ -681,48 +787,32 @@ def export_agg_to_csv(
     df.to_csv(out_path)
     return df
 
-def main():
-    args = parse_args()
-    # print(args)
-    set_seed(args.seed)
-    logger.info("Running single-GPU evaluation.")
-
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() else "cpu"
-    )
-    model = create_model(args, device)
-    dataset = create_dataset(args)
-    boundary_dataset = create_boundary_dataset(args)
-    dataloader = DataLoader(dataset, batch_size = args.batch_size, shuffle = False, num_workers = args.num_workers, pin_memory = True)
-
-    criterion_list = []
-    err_agg_list = []
-    for metric in args.eval_metric:
-        if metric == "MSE":
-            criterion_list.append(AuroraMSELoss)
-        elif metric == "MAE":
-            criterion_list.append(AuroraMAELoss)
+def _mp_worker_entry(rank, world_size, args):
+    set_seed(args.seed + rank)
+    if torch.cuda.is_available():
+        # If user provided explicit GPU list, use mapping; otherwise fall back to rank->device
+        gpu_list = getattr(args, 'gpu_list', None)
+        if gpu_list is not None:
+            gpu_id = int(gpu_list[rank])
         else:
-            raise Exception(f"Unsupported eval metric: {metric}")
+            gpu_id = int(rank)
+        torch.cuda.set_device(gpu_id)
+        device = torch.device(f"cuda:{gpu_id}")
+    else:
+        device = torch.device("cpu")
 
-        err_agg_list.append(
-            prepare_each_lead_time_agg(
-                rollout_step = args.rollout_step,
-                lead_time = args.lead_time,
-                # max_lead_time = args.rollout_step,
-                surface_variables = args.surface_variables,
-                upper_variables = args.upper_variables,
-                levels = args.levels,
-                err_type = metric,
-            )
-        )
-
-
-    if args.save_rollout_step is not None:
-        gen_result_folder = Path(args.gen_result_folder)
-        gen_result_folder.mkdir(parents = True, exist_ok = True)
-        
-        logger.info(f"Saving lead time outputs to {args.gen_result_folder}")
+    model = create_model(args, device)
+    full_dataset = create_dataset(args)
+    eval_dataset = _manual_split_dataset(full_dataset, rank, world_size)
+    boundary_dataset = create_boundary_dataset(args)
+    dataloader = DataLoader(
+        eval_dataset,
+        batch_size = args.batch_size,
+        shuffle = False,
+        num_workers = args.num_workers,
+        pin_memory = True,
+    )
+    criterion_list, err_agg_list = _build_metric_lists(args)
 
     evaluate(
         args,
@@ -732,9 +822,100 @@ def main():
         err_agg_list,
         device,
         boundary_dataset = boundary_dataset,
+        rank = rank,
+        metadata_dataset = full_dataset,
     )
 
-    for metric, err_agg in zip(args.eval_metric, err_agg_list):
+    tmp_root = Path(args.csv_output_folder) if args.csv_output_folder is not None else Path(args.gen_result_folder)
+    tmp_root.mkdir(parents = True, exist_ok = True)
+    out_path = tmp_root / f".mp_rank_{rank}_metrics.json"
+    payload = {
+        "rank": rank,
+        "metrics": {
+            metric: _err_agg_to_state(err_agg)
+            for metric, err_agg in zip(args.eval_metric, err_agg_list)
+        },
+    }
+    with out_path.open("w", encoding = "utf-8") as f:
+        json.dump(payload, f)
+
+def main():
+    args = parse_args()
+    # If user passed --gpus, parse into list and attach to args for worker mapping
+    gpu_list = None
+    if getattr(args, 'gpus', None):
+        gpu_list = [x.strip() for x in args.gpus.split(",") if x.strip() != ""]
+        args.gpu_list = gpu_list
+    else:
+        args.gpu_list = None
+
+    world_size = _resolve_mp_world_size(args)
+
+    if args.save_rollout_step is not None:
+        gen_result_folder = Path(args.gen_result_folder)
+        gen_result_folder.mkdir(parents = True, exist_ok = True)
+        logger.info(f"Saving lead time outputs to {args.gen_result_folder}")
+
+    if args.csv_output_folder is not None:
+        Path(args.csv_output_folder).mkdir(parents = True, exist_ok = True)
+
+    if world_size <= 1:
+        set_seed(args.seed)
+        logger.info("Running single-process evaluation.")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = create_model(args, device)
+        dataset = create_dataset(args)
+        boundary_dataset = create_boundary_dataset(args)
+        dataloader = DataLoader(dataset, batch_size = args.batch_size, shuffle = False, num_workers = args.num_workers, pin_memory = True)
+        criterion_list, err_agg_list = _build_metric_lists(args)
+
+        evaluate(
+            args,
+            model,
+            dataloader,
+            criterion_list,
+            err_agg_list,
+            device,
+            boundary_dataset = boundary_dataset,
+            rank = 0,
+            metadata_dataset = dataset,
+        )
+
+        for metric, err_agg in zip(args.eval_metric, err_agg_list):
+            if args.csv_output_folder is not None:
+                csv_folder = Path(args.csv_output_folder)
+                csv_folder.mkdir(parents = True, exist_ok = True)
+                csv_output_path = csv_folder / f"{metric}.csv"
+                logger.info(f"Exporting results to CSV: {csv_output_path}")
+                export_agg_to_csv(args, err_agg, out_path = csv_output_path)
+        return
+
+    logger.info("Running multiprocessing evaluation with world_size=%s", world_size)
+
+    mp_ctx = mp.get_context("spawn")
+
+    processes = []
+    for rank in range(world_size):
+        p = mp_ctx.Process(target = _mp_worker_entry, args = (rank, world_size, args))
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()
+        if p.exitcode != 0:
+            raise RuntimeError(f"Worker process failed with exit code {p.exitcode}.")
+
+    _, merged_err_agg_list = _build_metric_lists(args)
+    tmp_root = Path(args.csv_output_folder) if args.csv_output_folder is not None else Path(args.gen_result_folder)
+    for rank in range(world_size):
+        p = tmp_root / f".mp_rank_{rank}_metrics.json"
+        with p.open("r", encoding = "utf-8") as f:
+            payload = json.load(f)
+        for metric_idx, metric in enumerate(args.eval_metric):
+            _merge_state_into_err_agg(merged_err_agg_list[metric_idx], payload["metrics"][metric])
+        p.unlink(missing_ok = True)
+
+    for metric, err_agg in zip(args.eval_metric, merged_err_agg_list):
         if args.csv_output_folder is not None:
             csv_folder = Path(args.csv_output_folder)
             csv_folder.mkdir(parents = True, exist_ok = True)

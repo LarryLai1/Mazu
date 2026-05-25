@@ -24,6 +24,7 @@ class BoundaryConditionDataset(torch.utils.data.Dataset):
         get_datetime: bool = True,
         enable_pooling: bool = False,
         interp_mode: str = "forward",
+        use_cache: bool = False,
     ) -> None:
         super().__init__()
         self.boundary_root_dir = boundary_root_dir
@@ -41,6 +42,7 @@ class BoundaryConditionDataset(torch.utils.data.Dataset):
         self.get_datetime = get_datetime
         self.enable_pooling = enable_pooling
         self.interp_mode = interp_mode
+        self.use_cache = use_cache
         if self.interp_mode not in ("forward", "surrounding"):
             raise ValueError(f"Unsupported interp_mode: {self.interp_mode}")
         self.time_axis = pd.date_range(
@@ -48,6 +50,12 @@ class BoundaryConditionDataset(torch.utils.data.Dataset):
             end = self.end_date_hour,
             freq = f"{self.forecast_cycle_hours}h",
         )
+        self._cache = {}
+        self._cache_latitude = None
+        self._cache_longitude = None
+        self._cache_levels = None
+        if self.use_cache:
+            self._build_cache()
 
     def map_var_name_for_Aurora(self, var_name: str) -> str:
         var_name_mapping = {
@@ -112,6 +120,78 @@ class BoundaryConditionDataset(torch.utils.data.Dataset):
         pooled = F.avg_pool2d(tensor.reshape(-1, 1, spatial_shape[0], spatial_shape[1]), kernel_size = 2, stride = 2)
         restored = F.interpolate(pooled, size = spatial_shape, mode = "bilinear", align_corners = False)
         return restored.reshape(*leading_shape, spatial_shape[0], spatial_shape[1])
+
+    def _load_boundary_source_from_files(self, date_hour: pd.Timestamp) -> dict:
+        upper_path, surface_path = self._dt_to_path(date_hour)
+        latitude_bounds, longitude_bounds = self._spatial_bounds()
+
+        with xr.open_dataset(upper_path, decode_timedelta = True) as upper_nc, xr.open_dataset(surface_path, decode_timedelta = True) as surface_nc:
+            upper_nc.load()
+            surface_nc.load()
+
+            latitude_slice = self._build_coord_slice(upper_nc.lat.values, latitude_bounds)
+            longitude_slice = self._build_coord_slice(upper_nc.lon.values, longitude_bounds)
+            level_dim = "level" if "level" in upper_nc.dims else "pressure_level"
+
+            source = {
+                "time_values": pd.DatetimeIndex(pd.to_datetime(upper_nc.time.values)),
+                "latitude": torch.as_tensor(upper_nc.lat.sel(lat = latitude_slice).values),
+                "longitude": torch.as_tensor(upper_nc.lon.sel(lon = longitude_slice).values),
+                "levels": tuple(upper_nc[level_dim].sel({level_dim: self.levels}).values),
+                "surf_vars": {},
+                "atmos_vars": {},
+            }
+
+            for surface_var in self.surface_variables:
+                mapped_name = self.map_var_name_for_Aurora(surface_var)
+                data_array = surface_nc[mapped_name].sel(
+                    lat = latitude_slice,
+                    lon = longitude_slice,
+                )
+                source["surf_vars"][mapped_name] = torch.as_tensor(data_array.values)
+
+            for upper_var in self.upper_variables:
+                data_array = upper_nc[upper_var].sel(
+                    lat = latitude_slice,
+                    lon = longitude_slice,
+                )
+                if level_dim in data_array.dims:
+                    data_array = data_array.sel({level_dim: self.levels})
+                source["atmos_vars"][upper_var] = torch.as_tensor(data_array.values)
+
+        return source
+
+    def _build_cache(self) -> None:
+        for date_hour in self.time_axis:
+            self._cache[pd.Timestamp(date_hour)] = self._load_boundary_source_from_files(date_hour)
+        first_source = self._cache[pd.Timestamp(self.time_axis[0])]
+        self._cache_latitude = first_source["latitude"]
+        self._cache_longitude = first_source["longitude"]
+        self._cache_levels = first_source["levels"]
+        # print(f"Cache built with {len(self._cache)} entries. Latitude shape: {self._cache_latitude.shape}, Longitude shape: {self._cache_longitude.shape}, Levels: {self._cache_levels}")
+
+    @staticmethod
+    def _select_from_source(
+        time_values: pd.DatetimeIndex,
+        tensor: torch.Tensor,
+        target_time: pd.Timestamp,
+    ) -> torch.Tensor:
+        target_time = pd.Timestamp(target_time)
+        if target_time in time_values:
+            return tensor[time_values.get_loc(target_time)]
+
+        idx = time_values.searchsorted(target_time, side = "left")
+        if idx <= 0:
+            return tensor[0]
+        if idx >= len(time_values):
+            return tensor[-1]
+
+        t1 = time_values[idx - 1]
+        t2 = time_values[idx]
+        data_1 = tensor[idx - 1]
+        data_2 = tensor[idx]
+        weight = (target_time - t1) / (t2 - t1)
+        return data_1 + (data_2 - data_1) * float(weight)
 
     def _choose_interp_times(
         self,
@@ -183,6 +263,8 @@ class BoundaryConditionDataset(torch.utils.data.Dataset):
         return len(self.time_axis)
 
     def get_latitude_longitude(self):
+        if self.use_cache:
+            return self._cache_latitude, self._cache_longitude
         upper_path, _ = self._dt_to_path(self.time_axis[0])
         latitude_bounds, longitude_bounds = self._spatial_bounds()
         with xr.open_dataset(upper_path, decode_timedelta = True) as upper_nc:
@@ -194,6 +276,8 @@ class BoundaryConditionDataset(torch.utils.data.Dataset):
         return torch.tensor(latitude), torch.tensor(longitude)
 
     def get_levels(self):
+        if self.use_cache:
+            return self._cache_levels
         upper_path, _ = self._dt_to_path(self.time_axis[0])
         with xr.open_dataset(upper_path, decode_timedelta = True) as upper_nc:
             upper_nc.load()
@@ -212,6 +296,27 @@ class BoundaryConditionDataset(torch.utils.data.Dataset):
     ) -> dict:
         base_time = pd.Timestamp(base_time)
         target_time = pd.Timestamp(target_time)
+        if self.use_cache:
+            source = self._cache[base_time]
+            result = {"surf_vars": {}, "atmos_vars": {}}
+            time_values = source["time_values"]
+
+            for surface_var in self.surface_variables:
+                mapped_name = self.map_var_name_for_Aurora(surface_var)
+                result["surf_vars"][mapped_name] = self._select_from_source(
+                    time_values,
+                    source["surf_vars"][mapped_name],
+                    target_time,
+                )
+
+            for upper_var in self.upper_variables:
+                result["atmos_vars"][upper_var] = self._select_from_source(
+                    time_values,
+                    source["atmos_vars"][upper_var],
+                    target_time,
+                )
+            return result
+
         upper_path, surface_path = self._dt_to_path(base_time)
 
         result = {"surf_vars": {}, "atmos_vars": {}}
@@ -233,7 +338,6 @@ class BoundaryConditionDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index: int) -> dict:
         date_hour = self.time_axis[index]
-        upper_path, surface_path = self._dt_to_path(date_hour)
 
         result = {
             "prediction_timedelta": torch.tensor(self.prediction_timedelta_hours, dtype = torch.int64),
@@ -241,20 +345,45 @@ class BoundaryConditionDataset(torch.utils.data.Dataset):
             "atmos_vars": {},
         }
 
-        with xr.open_dataset(upper_path, decode_timedelta = True) as upper_nc, xr.open_dataset(surface_path, decode_timedelta = True) as surface_nc:
-            upper_nc.load()
-            surface_nc.load()
+        if self.use_cache:
+            source = self._cache[date_hour]
+            time_values = source["time_values"]
 
             for prediction_timedelta in self.prediction_timedeltas:
                 target_time = date_hour + prediction_timedelta
                 for surface_var in self.surface_variables:
                     mapped_name = self.map_var_name_for_Aurora(surface_var)
-                    data = self._select_data_array_at_time(surface_nc, mapped_name, target_time)
+                    data = self._select_from_source(
+                        time_values,
+                        source["surf_vars"][mapped_name],
+                        target_time,
+                    )
                     result["surf_vars"].setdefault(mapped_name, []).append(data)
 
                 for upper_var in self.upper_variables:
-                    data = self._select_data_array_at_time(upper_nc, upper_var, target_time)
+                    data = self._select_from_source(
+                        time_values,
+                        source["atmos_vars"][upper_var],
+                        target_time,
+                    )
                     result["atmos_vars"].setdefault(upper_var, []).append(data)
+        else:
+            upper_path, surface_path = self._dt_to_path(date_hour)
+
+            with xr.open_dataset(upper_path, decode_timedelta = True) as upper_nc, xr.open_dataset(surface_path, decode_timedelta = True) as surface_nc:
+                upper_nc.load()
+                surface_nc.load()
+
+                for prediction_timedelta in self.prediction_timedeltas:
+                    target_time = date_hour + prediction_timedelta
+                    for surface_var in self.surface_variables:
+                        mapped_name = self.map_var_name_for_Aurora(surface_var)
+                        data = self._select_data_array_at_time(surface_nc, mapped_name, target_time)
+                        result["surf_vars"].setdefault(mapped_name, []).append(data)
+
+                    for upper_var in self.upper_variables:
+                        data = self._select_data_array_at_time(upper_nc, upper_var, target_time)
+                        result["atmos_vars"].setdefault(upper_var, []).append(data)
 
         result["surf_vars"] = {
             var_name: torch.stack(tensors, dim = 0)

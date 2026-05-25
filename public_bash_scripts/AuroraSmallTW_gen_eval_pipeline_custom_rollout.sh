@@ -9,6 +9,7 @@ usage() {
     echo "  --boundary_width N       Boundary width (default: 2)" >&2
     echo "  --boundary_mode MODE     Boundary mode (default: inject-inside)" >&2
     echo "  --boundary_pooling MODE  Boundary pooling then reshape (default: no)" >&2
+    echo "  --boundary_use_cache     Preload boundary data into memory (default: off)" >&2
 }
 
 CUDA_VISIBLE_DEVICES_VALUE="3,4,5"
@@ -16,6 +17,7 @@ boundary_width=2
 boundary_mode="inject-inside"
 # boundary_pooling="yes"
 boundary_pooling="no"
+boundary_use_cache=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -35,6 +37,11 @@ while [[ $# -gt 0 ]]; do
             boundary_pooling="$2"
             shift 2
             ;;
+        --boundary_use_cache)
+            boundary_use_cache="--boundary_use_cache"
+            echo "Boundary use cache enabled"
+            shift 1
+            ;;
         -h|--help)
             usage
             exit 0
@@ -53,7 +60,7 @@ MODEL_CKPT_FOLDER="/tmp3/b12902101/Mazu/checkpoint-50"
 MODEL_CKPT_PATH="${MODEL_CKPT_FOLDER}/model.safetensors"
 
 start_time="2020-07-01 00:00:00"
-end_time="2016-08-31 23:00:00"
+end_time="2020-08-31 23:00:00"
 OUTPUT_FOLDER_NAME="${start_time:0:10}_${end_time:0:10}_boundary${boundary_width}_${boundary_mode}_pooling${boundary_pooling}"
 
 EXPERIMENT_ID=$(basename "$(dirname "$(dirname "$MODEL_CKPT_FOLDER")")")
@@ -80,13 +87,15 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --longitude 100 144.75 \
     --lead_time 1 \
     --input_time_window 1 \
-    --rollout_step 12 \
+    --rollout_step 72 \
     --timestep_hours 1 \
     --boundary_width ${boundary_width} \
     --boundary_mode ${boundary_mode} \
     --boundary_pooling ${boundary_pooling} \
+    ${boundary_use_cache} \
     --mixed_precision 'no' \
     --eval_metric MSE MAE \
-    --gen_result_folder "${MODEL_CKPT_FOLDER}/${OUTPUT_FOLDER_NAME}/preds" \
     --csv_output_folder "${MODEL_CKPT_FOLDER}/${OUTPUT_FOLDER_NAME}/errs" \
+    --gpus "${CUDA_VISIBLE_DEVICES_VALUE}" \
     2>&1 | tee "${LOG_FILE}" \
+    # --gen_result_folder "${MODEL_CKPT_FOLDER}/${OUTPUT_FOLDER_NAME}/preds" \
