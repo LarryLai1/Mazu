@@ -917,6 +917,7 @@ def _mp_worker_entry(rank, world_size, args):
 
 def main():
     args = parse_args()
+    # print(args.csv_output_folder)
     # If user passed --gpus, parse into list and attach to args for worker mapping
     gpu_list = None
     if getattr(args, 'gpus', None):

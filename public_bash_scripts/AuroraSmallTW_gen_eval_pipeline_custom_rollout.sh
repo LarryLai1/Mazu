@@ -92,9 +92,8 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --boundary_width ${boundary_width} \
     --boundary_mode ${boundary_mode} \
     --boundary_pooling ${boundary_pooling} \
-    ${boundary_use_cache} \
-    --gpu_cache
-    --mixed_precision 'no' \
+    --boundary_use_cache \
+    --gpu_cache \
     --eval_metric MSE MAE \
     --csv_output_folder "${MODEL_CKPT_FOLDER}/${OUTPUT_FOLDER_NAME}/errs" \
     --gpus "${CUDA_VISIBLE_DEVICES_VALUE}" \
