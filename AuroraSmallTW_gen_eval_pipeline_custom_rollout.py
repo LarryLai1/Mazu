@@ -894,12 +894,7 @@ def export_agg_to_csv(
 def _mp_worker_entry(rank, world_size, args):
     set_seed(args.seed + rank)
     if torch.cuda.is_available():
-        # If user provided explicit GPU list, use mapping; otherwise fall back to rank->device
-        gpu_list = getattr(args, 'gpu_list', None)
-        if gpu_list is not None:
-            gpu_id = int(gpu_list[rank])
-        else:
-            gpu_id = int(rank)
+        gpu_id = int(rank)
         torch.cuda.set_device(gpu_id)
         device = torch.device(f"cuda:{gpu_id}")
     else:

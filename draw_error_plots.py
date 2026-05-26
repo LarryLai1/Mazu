@@ -28,6 +28,10 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
+UPPER_BASE_VARS = ["u", "v", "t", "q", "z"]
+UPPER_PRESSURES = [1000, 925, 850, 700, 500, 300, 150, 50]
+
+
 def sanitize_filename(s: str) -> str:
     """Turn a variable name into a safe filename chunk."""
     s = str(s).strip()
@@ -155,6 +159,27 @@ def parse_style_kwargs(style_str: str) -> Dict[str, Any]:
     return out
 
 
+def split_upper_variable_name(name: str):
+    """Return (base_var, pressure) for names like q_1000, or None otherwise."""
+    m = re.fullmatch(r"([uvtqz])_(1000|925|850|700|500|300|150|50)", str(name))
+    if not m:
+        return None
+    return m.group(1), int(m.group(2))
+
+
+def plot_series(ax, xs, ys, label: str, style: Dict[str, Any], args):
+    """Plot one CSV series with the script's style defaults applied."""
+    plot_style = dict(style)
+    plot_style.setdefault("alpha", args.alpha)
+    if plot_style.get("marker", None) is not None:
+        plot_style.setdefault("markersize", args.markersize)
+    if "linestyle" not in plot_style and "marker" not in plot_style:
+        plot_style["linestyle"] = "-"
+        plot_style.setdefault("linewidth", 2.0)
+
+    ax.plot(xs, ys, label=label, **plot_style)
+
+
 def main():
     args = parse_args()
     output_dir = Path(args.output_dir)
@@ -202,6 +227,14 @@ def main():
     # Build union of all variable names present
     all_vars = collect_all_variables(frames, var_cols)
 
+    upper_vars_present = {
+        base
+        for var_name in all_vars
+        for split in [split_upper_variable_name(var_name)]
+        if split is not None
+        for base, _pressure in [split]
+    }
+
     # For quick lookup by (file -> variable -> row)
     row_maps: Dict[Path, Dict[str, pd.Series]] = {}
     for p, df, var_col in zip(csv_paths, frames, var_cols):
@@ -215,8 +248,71 @@ def main():
             for v, tup in zip(df[var_col].astype(str).tolist(), df.itertuples(index=False, name=None))
         }
 
+    # Generate one combined figure per upper-variable base (u, v, t, q, z).
+    for base_var in [v for v in UPPER_BASE_VARS if v in upper_vars_present]:
+        fig, axes = plt.subplots(
+            2,
+            4,
+            figsize=(args.width * 3.0, args.height * 2.0),
+            sharex=True,
+            sharey=False,
+        )
+        axes_flat = axes.flatten()
+        any_data = False
+
+        for ax, pressure in zip(axes_flat, UPPER_PRESSURES):
+            var_name = f"{base_var}_{pressure}"
+            has_any = False
+
+            for p in csv_paths:
+                if var_name not in row_maps[p]:
+                    continue
+
+                row = row_maps[p][var_name]
+                time_cols = time_cols_by_file[p]
+                hours = hours_by_file[p]
+
+                y = pd.to_numeric(row[time_cols], errors="coerce").values
+                mask = pd.notna(y)
+                if not mask.any():
+                    continue
+
+                xs = [h for h, m in zip(hours, mask) if m]
+                ys = [val for val, m in zip(y, mask) if m]
+                if not xs:
+                    continue
+
+                plot_series(
+                    ax,
+                    xs,
+                    ys,
+                    label_by_file[p],
+                    style_by_file.get(p, {}),
+                    args,
+                )
+                has_any = True
+                any_data = True
+
+            ax.set_title(f"{pressure} hPa")
+            ax.grid(True)
+            if ax in axes_flat[::4]:
+                ax.set_ylabel("loss value")
+            if ax in axes_flat[-4:]:
+                ax.set_xlabel("forecast hour")
+            if has_any:
+                ax.legend(loc="best", frameon=True)
+
+        if any_data:
+            fig.suptitle(base_var)
+            fig.tight_layout()
+            fig.savefig(output_dir / f"{base_var}_upper_levels.{args.ext}", dpi=args.dpi)
+        plt.close(fig)
+
     # Generate one plot per variable, adding a series for each CSV that contains it
     for var_name in all_vars:
+        if split_upper_variable_name(var_name) is not None:
+            continue
+
         plt.figure(figsize=(args.width, args.height))
 
         has_any = False
@@ -240,26 +336,7 @@ def main():
             if not xs:
                 continue
 
-            # Apply per-file style kwargs (explicit control)
-            style = dict(style_by_file.get(p, {}))
-
-            # Defaults if user didn't specify
-            style.setdefault("alpha", args.alpha)
-            # If a marker is present but markersize not specified, use CLI default
-            if style.get("marker", None) is not None:
-                style.setdefault("markersize", args.markersize)
-
-            # If user didn't specify any linestyle/marker at all, default to a solid line
-            if "linestyle" not in style and "marker" not in style:
-                style["linestyle"] = "-"
-                style.setdefault("linewidth", 2.0)
-
-            plt.plot(
-                xs,
-                ys,
-                label=label_by_file[p],
-                **style,
-            )
+            plot_series(plt.gca(), xs, ys, label_by_file[p], style_by_file.get(p, {}), args)
             has_any = True
 
         if not has_any:
