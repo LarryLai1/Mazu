@@ -9,3 +9,5 @@ Mazu_training_results/*
 my_validation_plots/*
 checkpoint-50/
 errs/
+plots.zip
+plots/

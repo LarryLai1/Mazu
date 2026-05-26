@@ -95,7 +95,7 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --boundary_use_cache \
     --gpu_cache \
     --eval_metric MSE MAE \
-    --csv_output_folder "${MODEL_CKPT_FOLDER}/${OUTPUT_FOLDER_NAME}/errs" \
+    --csv_output_folder "${MODEL_CKPT_FOLDER}/${OUTPUT_FOLDER_NAME}" \
     --gpus "${CUDA_VISIBLE_DEVICES_VALUE}" \
     2>&1 | tee "${LOG_FILE}" \
     # --gen_result_folder "${MODEL_CKPT_FOLDER}/${OUTPUT_FOLDER_NAME}/preds" \
