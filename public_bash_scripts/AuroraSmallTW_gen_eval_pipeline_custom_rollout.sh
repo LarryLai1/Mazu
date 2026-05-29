@@ -63,7 +63,7 @@ era5_boundary_root="/tmp3/b12902101/era5_tw_forecast_3d"
 boundary_source="era5"
 # boundary_source="aurora"
 
-OUTPUT_FOLDER_NAME="${boundary_source}_boundary${boundary_width}_${boundary_mode}_pooling${boundary_pooling}"
+OUTPUT_FOLDER_NAME="/home/LarryLai/LAM_output/${boundary_source}_boundary${boundary_width}_${boundary_mode}_pooling${boundary_pooling}"
 
 EXPERIMENT_ID=$(basename "$(dirname "$(dirname "$MODEL_CKPT_FOLDER")")")
 CKPT_NAME=$(basename "$MODEL_CKPT_FOLDER")
@@ -82,7 +82,7 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --data_root_dir /tmp3/yunye0121/era5_tw \
     --boundary_root_dir "${boundary_root_dir}" \
     --checkpoint_path "${MODEL_CKPT_PATH}" \
-    --batch_size 16 \
+    --batch_size 8 \
     --num_workers 4 \
     --seed 1126 \
     --start_date_hour "${start_time}" \
@@ -95,7 +95,6 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --longitude 100 144.75 \
     --lead_time 1 \
     --input_time_window 1 \
-    --save_rollout_step 1 2 4 8 12 24 36 48 60 72 \
     --rollout_step 72 \
     --timestep_hours 1 \
     --boundary_width ${boundary_width} \
@@ -104,7 +103,9 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --boundary_source ${boundary_source} \
     --gpu_cache \
     --eval_metric MSE MAE \
-    --csv_output_folder "${MODEL_CKPT_FOLDER}/${OUTPUT_FOLDER_NAME}" \
-    --gen_result_folder "${MODEL_CKPT_FOLDER}/${OUTPUT_FOLDER_NAME}/preds" \
+    --csv_output_folder "${OUTPUT_FOLDER_NAME}" \
+    --gen_result_folder "${OUTPUT_FOLDER_NAME}/preds" \
     --gpus "${CUDA_VISIBLE_DEVICES_VALUE}" \
     2>&1 | tee "${LOG_FILE}" \
+
+# --save_rollout_step 1 2 4 8 12 24 36 48 60 72 \
