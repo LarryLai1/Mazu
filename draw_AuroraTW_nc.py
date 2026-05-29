@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import math
 import argparse
 import os
+from datetime import datetime
 
 # --- Helper function to select lat/lon range ---
 def select_latlon_range(da, latitude_range, longitude_range):
@@ -116,6 +117,10 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    creation_time = os.path.getctime(args.file_path)
+    print(f"File creation time: {datetime.fromtimestamp(creation_time)}")
+    
 
     latitude_range = tuple(args.latitude) if args.latitude is not None else None
     longitude_range = tuple(args.longitude) if args.longitude is not None else None

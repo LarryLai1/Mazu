@@ -45,8 +45,8 @@ def plot_surf_vars(ds, figsize=(8, 6), outdir="plots_surf", cmap="cividis",
                 if latitude_range is not None and longitude_range is not None:
                     da = select_latlon_range(da, latitude_range, longitude_range)
                 
-                # filename = f"{outdir}/{var}.png"
-                filename = f"{outdir}/{var}.pdf"
+                filename = f"{outdir}/{var}.png"
+                # filename = f"{outdir}/{var}.pdf"
                 plot_clean_heatmap(da, filename, cmap, figsize)
             else:
                 print(f"Skipping {var}: dims {da.dims} (not 2D lat/lon)")
@@ -68,8 +68,8 @@ def plot_atmos_vars_all_levels(ds, figsize=(8, 6), outdir="plots_atmos", cmap="v
                         if latitude_range is not None and longitude_range is not None:
                             da_level = select_latlon_range(da_level, latitude_range, longitude_range)
                         
-                        # filename = f"{outdir}/{var}_{lev}.png"
-                        filename = f"{outdir}/{var}_{lev}.pdf"
+                        filename = f"{outdir}/{var}_{lev}.png"
+                        # filename = f"{outdir}/{var}_{lev}.pdf"
                         plot_clean_heatmap(da_level, filename, cmap, figsize)
                     else:
                         print(f"Skipping {var} at level {lev}: dims {da_level.dims} (not 2D lat/lon)")
@@ -97,8 +97,11 @@ if __name__ == "__main__":
         "--longitude", type=float, nargs=2, metavar=("LON_MIN", "LON_MAX"),
         help="Longitude range: min max (e.g., --longitude 120 125)"
     )
+    from datetime import datetime
 
     args = parser.parse_args()
+    creation_time = os.path.getctime(args.file_path)
+    print(f"File creation time: {datetime.fromtimestamp(creation_time)}")
 
     latitude_range = tuple(args.latitude) if args.latitude is not None else None
     longitude_range = tuple(args.longitude) if args.longitude is not None else None

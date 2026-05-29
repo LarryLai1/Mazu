@@ -334,12 +334,35 @@ def _get_boundary_source_on_device(
         "surf_vars": {},
         "atmos_vars": {},
     }
+    if "prediction_timedelta_hours" in source:
+        gpu_source["prediction_timedelta_hours"] = source["prediction_timedelta_hours"].to(device)
     for var_name, tensor in source["surf_vars"].items():
         gpu_source["surf_vars"][var_name] = tensor.to(device)
     for var_name, tensor in source["atmos_vars"].items():
         gpu_source["atmos_vars"][var_name] = tensor.to(device)
     gpu_cache[base_time] = gpu_source
     return gpu_source
+
+def _build_boundary_batch_from_era5_source(
+    boundary_dataset,
+    source_cache,
+    base_times,
+    target_times,
+):
+    surf_vars = {}
+    atmos_vars = {}
+
+    for base_time, target_time in zip(base_times, target_times):
+        source = source_cache[base_time]
+        data = boundary_dataset.get_boundary_at_time_from_source(source, base_time, target_time)
+        for var_name, tensor in data["surf_vars"].items():
+            surf_vars.setdefault(var_name, []).append(tensor)
+        for var_name, tensor in data["atmos_vars"].items():
+            atmos_vars.setdefault(var_name, []).append(tensor)
+
+    surf_vars = {k: torch.stack(v, dim = 0) for k, v in surf_vars.items()}
+    atmos_vars = {k: torch.stack(v, dim = 0) for k, v in atmos_vars.items()}
+    return {"surf_vars": surf_vars, "atmos_vars": atmos_vars}
 
 def _build_boundary_batch_from_gpu_cache(
     boundary_dataset,
@@ -369,11 +392,14 @@ def _is_increasing(coord: torch.Tensor) -> bool:
         return False
     return coord[0].item() < coord[-1].item()
 
-def _align_boundary_batch(boundary_batch, flip_lat: bool, flip_lon: bool):
+def _align_boundary_batch(boundary_batch, flip_lat: bool, flip_lon: bool, print_debug = False):
     if not (flip_lat or flip_lon):
         return boundary_batch
     lat_dim = -2
     lon_dim = -1
+    # flip_lat = (not flip_lat)
+    if print_debug:
+        print(f"Before alignment {next(iter(boundary_batch['surf_vars']))}: {boundary_batch['surf_vars'][next(iter(boundary_batch['surf_vars']))][..., lat_dim]}")
     for var_dict in (boundary_batch["surf_vars"], boundary_batch["atmos_vars"]):
         for k, tensor in var_dict.items():
             if flip_lat:
@@ -381,6 +407,8 @@ def _align_boundary_batch(boundary_batch, flip_lat: bool, flip_lon: bool):
             if flip_lon:
                 tensor = torch.flip(tensor, dims = (lon_dim,))
             var_dict[k] = tensor
+    if print_debug:
+        print(f"After alignment {next(iter(boundary_batch['surf_vars']))}: {boundary_batch['surf_vars'][next(iter(boundary_batch['surf_vars']))][..., lat_dim]}")
     return boundary_batch
 
 def _center_crop_boundary(tensor, boundary_width):
@@ -524,6 +552,7 @@ def evaluate(
 
     boundary_enabled = boundary_dataset is not None and args.boundary_width > 0
     gpu_boundary_cache = {}
+    boundary_is_era5 = isinstance(boundary_dataset, BoundaryConditionDataset_ERA5)
 
     if boundary_enabled:
         boundary_latitudes, boundary_longitude = boundary_dataset.get_latitude_longitude()
@@ -565,7 +594,29 @@ def evaluate(
             prefetched_boundary = None
             if boundary_enabled:
                 prefetched_boundary = {}
-                if args.gpu_cache:
+                if boundary_is_era5:
+                    source_cache = gpu_boundary_cache if args.gpu_cache else {}
+                    for base_time in set(base_times):
+                        _get_boundary_source_on_device(
+                            boundary_dataset,
+                            base_time,
+                            source_cache,
+                            device,
+                        )
+                    for k in range(0, args.rollout_step + 1):
+                        target_times_k = tuple(
+                            pd.Timestamp(d) + pd.Timedelta(hours = k * args.lead_time)
+                            for d in dates
+                        )
+                        b_step = _build_boundary_batch_from_era5_source(
+                            boundary_dataset,
+                            source_cache,
+                            base_times,
+                            target_times_k,
+                        )
+                        b_step = _align_boundary_batch(b_step, flip_lat, flip_lon)
+                        prefetched_boundary[k] = b_step
+                elif args.gpu_cache:
                     for base_time in set(base_times):
                         _get_boundary_source_on_device(
                             boundary_dataset,
@@ -605,11 +656,21 @@ def evaluate(
 
             if boundary_enabled and args.boundary_mode == "pad-outside":
                 # use prefetched boundary for initial pad-outside
-                boundary_init = prefetched_boundary[0] if prefetched_boundary is not None else _build_boundary_batch(
-                    boundary_dataset,
-                    base_times,
-                    batch_times,
-                )
+                if prefetched_boundary is not None:
+                    boundary_init = prefetched_boundary[0]
+                elif boundary_is_era5:
+                    boundary_init = _build_boundary_batch_from_era5_source(
+                        boundary_dataset,
+                        gpu_boundary_cache if args.gpu_cache else {},
+                        base_times,
+                        batch_times,
+                    )
+                else:
+                    boundary_init = _build_boundary_batch(
+                        boundary_dataset,
+                        base_times,
+                        batch_times,
+                    )
 
                 padded_inputs = {"surf_vars": {}, "atmos_vars": {}}
                 for var_name, tensor in inputs["surf_vars"].items():
@@ -634,12 +695,25 @@ def evaluate(
             # ================== 新增修改：針對 inject-inside 模式進行初始輸入覆寫 ==================
             elif boundary_enabled and args.boundary_mode == "inject-inside":
                 # 取得初始時間點的真實邊界（從 prefetched 取得，已在 device）
-                boundary_init = prefetched_boundary[0] if prefetched_boundary is not None else _build_boundary_batch(
-                    boundary_dataset,
-                    base_times,
-                    batch_times,
-                )
-                boundary_init = _align_boundary_batch(boundary_init, flip_lat, flip_lon)
+                if prefetched_boundary is not None:
+                    boundary_init = prefetched_boundary[0]
+                elif boundary_is_era5:
+                    boundary_init = _build_boundary_batch_from_era5_source(
+                        boundary_dataset,
+                        gpu_boundary_cache if args.gpu_cache else {},
+                        base_times,
+                        batch_times,
+                    )
+                else:
+                    boundary_init = _build_boundary_batch(
+                        boundary_dataset,
+                        base_times,
+                        batch_times,
+                    )
+                
+                # boundary_init = _align_boundary_batch(boundary_init, flip_lat, flip_lon)
+                # print(boundary_latitudes)
+                # exit()
 
                 # boundary_init 已被移到 device during prefetch; use directly
                 boundary_inside = {
@@ -658,6 +732,7 @@ def evaluate(
                     # 配合 inputs 的維度 (Batch, Time, Lat, Lon)，將邊界張量增加 Time 維度並對齊
                     b_tensor = boundary_inside["surf_vars"][var_name].unsqueeze(1).expand(-1, tensor.shape[1], -1, -1)
                     inputs["surf_vars"][var_name] = _replace_boundary_inside(tensor, b_tensor, args.boundary_width)
+
                     
                 for var_name, tensor in inputs["atmos_vars"].items():
                     # 配合 inputs 的維度 (Batch, Time, Level, Lat, Lon)，將邊界張量增加 Time 維度並對齊
@@ -739,11 +814,21 @@ def evaluate(
                         # print(dates)
                         # print(target_times)
                         # use prefetched per-step boundary (already on device); cast to pred dtype as needed
-                        boundary_step = prefetched_boundary[t] if prefetched_boundary is not None else _build_boundary_batch(
-                            boundary_dataset,
-                            base_times,
-                            target_times,
-                        )
+                        if prefetched_boundary is not None:
+                            boundary_step = prefetched_boundary[t]
+                        elif boundary_is_era5:
+                            boundary_step = _build_boundary_batch_from_era5_source(
+                                boundary_dataset,
+                                gpu_boundary_cache if args.gpu_cache else {},
+                                base_times,
+                                target_times,
+                            )
+                        else:
+                            boundary_step = _build_boundary_batch(
+                                boundary_dataset,
+                                base_times,
+                                target_times,
+                            )
                         for var_name, tensor in boundary_step["surf_vars"].items():
                             boundary_step["surf_vars"][var_name] = tensor.to(device, dtype = _pred.surf_vars[var_name].dtype)
                         for var_name, tensor in boundary_step["atmos_vars"].items():
