@@ -71,6 +71,26 @@ def parse_args():
         choices = ["no", "yes"],
     )
     parser.add_argument(
+        "--boundary_smooth_mode",
+        type = str,
+        default = "no",
+        choices = ["no", "mean", "gaussian"],
+        help = "Apply 3x3 smoothing/pooling after boundary replacement.",
+    )
+    parser.add_argument(
+        "--boundary_smooth_width_adjustment",
+        type = int,
+        default = 0,
+        help = "Adjustment to sliced boundary width when smoothing is enabled.",
+    )
+    parser.add_argument(
+        "--boundary_time_interp_mode",
+        type = str,
+        default = "interpolation",
+        choices = ["interpolation", "nearest", "exact"],
+        help = "Method of time interpolation for boundary dataset.",
+    )
+    parser.add_argument(
         "--boundary_use_cache",
         action = "store_true",
         help = "Preload all boundary files into memory and serve boundary data from cache.",
@@ -253,6 +273,12 @@ def create_boundary_dataset(args):
             prediction_timedeltas = [0, 12]
         else:
             prediction_timedeltas = [0, 6, 12]
+
+    # Use "nearest" time interpolation internally when "exact" mode is requested 
+    # so that data loading never fails with None, allowing us to perform exact 
+    # matching selectively during evaluation steps.
+    internal_time_interp_mode = "nearest" if args.boundary_time_interp_mode == "exact" else args.boundary_time_interp_mode
+
     if args.boundary_source == "era5":
         return BoundaryConditionDataset_ERA5(
             boundary_root_dir = args.boundary_root_dir,
@@ -267,6 +293,7 @@ def create_boundary_dataset(args):
             prediction_timedeltas = prediction_timedeltas,
             enable_pooling = (args.boundary_pooling == "yes"),
             use_cache = args.boundary_use_cache,
+            time_interp_mode = internal_time_interp_mode,
         )
     return BoundaryConditionDataset_Aurora(
         boundary_root_dir = args.boundary_root_dir,
@@ -281,6 +308,7 @@ def create_boundary_dataset(args):
         prediction_timedeltas = prediction_timedeltas,
         enable_pooling = (args.boundary_pooling == "yes"),
         use_cache = args.boundary_use_cache,
+        time_interp_mode = internal_time_interp_mode,
     )
 
 def log_weather_variable_error_with_lead_time(loss_dict, t, lead_time_agg):
@@ -311,6 +339,8 @@ def _build_boundary_batch(
 
     for base_time, target_time in zip(base_times, target_times):
         data = boundary_dataset.get_boundary_at_time(base_time, target_time)
+        if data is None:
+            return None
         for var_name, tensor in data["surf_vars"].items():
             surf_vars.setdefault(var_name, []).append(tensor)
         for var_name, tensor in data["atmos_vars"].items():
@@ -355,6 +385,8 @@ def _build_boundary_batch_from_era5_source(
     for base_time, target_time in zip(base_times, target_times):
         source = source_cache[base_time]
         data = boundary_dataset.get_boundary_at_time_from_source(source, base_time, target_time)
+        if data is None:
+            return None
         for var_name, tensor in data["surf_vars"].items():
             surf_vars.setdefault(var_name, []).append(tensor)
         for var_name, tensor in data["atmos_vars"].items():
@@ -376,11 +408,29 @@ def _build_boundary_batch_from_gpu_cache(
     for base_time, target_time in zip(base_times, target_times):
         source = gpu_cache[base_time]
         time_values = source["time_values"]
+
+        # Check exact mode for cached boundary
+        if getattr(boundary_dataset, "time_interp_mode", "interpolation") == "exact":
+            if "prediction_timedelta_hours" in source:
+                prediction_timedelta_hours = source["prediction_timedelta_hours"]
+                target_prediction_timedelta_hours = float((target_time - base_time) / pd.Timedelta(hours = 1))
+                diffs = torch.abs(prediction_timedelta_hours - target_prediction_timedelta_hours)
+                min_diff = torch.min(diffs).item()
+                if min_diff > 1e-4:
+                    return None
+            else:
+                if target_time not in time_values:
+                    return None
+
         for var_name, tensor in source["surf_vars"].items():
             selected = boundary_dataset._select_from_source(time_values, tensor, target_time)
+            if selected is None:
+                return None
             surf_vars.setdefault(var_name, []).append(selected)
         for var_name, tensor in source["atmos_vars"].items():
             selected = boundary_dataset._select_from_source(time_values, tensor, target_time)
+            if selected is None:
+                return None
             atmos_vars.setdefault(var_name, []).append(selected)
 
     surf_vars = {k: torch.stack(v, dim = 0) for k, v in surf_vars.items()}
@@ -393,6 +443,8 @@ def _is_increasing(coord: torch.Tensor) -> bool:
     return coord[0].item() < coord[-1].item()
 
 def _align_boundary_batch(boundary_batch, flip_lat: bool, flip_lon: bool, print_debug = False):
+    if boundary_batch is None:
+        return None
     if not (flip_lat or flip_lon):
         return boundary_batch
     lat_dim = -2
@@ -472,6 +524,28 @@ def _slice_interior(tensor, boundary_width):
     if boundary_width <= 0:
         return tensor
     return tensor[..., boundary_width:-boundary_width, boundary_width:-boundary_width]
+
+def _smooth_tensor_2d(tensor, mode):
+    if mode == "no":
+        return tensor
+    orig_shape = tensor.shape
+    h, w = orig_shape[-2:]
+    flat_tensor = tensor.view(-1, 1, h, w)
+    if mode == "mean":
+        kernel = torch.ones((1, 1, 3, 3), dtype = tensor.dtype, device = tensor.device) / 9.0
+    elif mode == "gaussian":
+        kernel = torch.tensor([
+            [1.0, 2.0, 1.0],
+            [2.0, 4.0, 2.0],
+            [1.0, 2.0, 1.0]
+        ], dtype = tensor.dtype, device = tensor.device)
+        kernel = kernel / kernel.sum()
+        kernel = kernel.view(1, 1, 3, 3)
+    else:
+        raise ValueError(f"Unsupported smoothing mode: {mode}")
+    padded = F.pad(flat_tensor, (1, 1, 1, 1), mode = "replicate")
+    smoothed = F.conv2d(padded, kernel)
+    return smoothed.view(orig_shape)
 
 def _prepare_batch_for_rollout(model, batch):
     batch = model.batch_transform_hook(batch)
@@ -672,23 +746,31 @@ def evaluate(
                         batch_times,
                     )
 
+                if boundary_init is None:
+                    raise ValueError(
+                        "In 'pad-outside' mode, boundary_init cannot be None because it is required to pad the inputs. "
+                        "Please use a boundary time interp mode other than 'exact', or align the evaluation start time with the boundary file resolution."
+                    )
+
                 padded_inputs = {"surf_vars": {}, "atmos_vars": {}}
                 for var_name, tensor in inputs["surf_vars"].items():
                     boundary_tensor = boundary_init["surf_vars"][var_name]
                     boundary_tensor = boundary_tensor.unsqueeze(1).expand(-1, tensor.shape[1], -1, -1)
-                    padded_inputs["surf_vars"][var_name] = _pad_interior_with_boundary(
+                    padded = _pad_interior_with_boundary(
                         tensor,
                         boundary_tensor,
                         args.boundary_width,
                     )
+                    padded_inputs["surf_vars"][var_name] = _smooth_tensor_2d(padded, args.boundary_smooth_mode)
                 for var_name, tensor in inputs["atmos_vars"].items():
                     boundary_tensor = boundary_init["atmos_vars"][var_name]
                     boundary_tensor = boundary_tensor.unsqueeze(1).expand(-1, tensor.shape[1], -1, -1, -1)
-                    padded_inputs["atmos_vars"][var_name] = _pad_interior_with_boundary(
+                    padded = _pad_interior_with_boundary(
                         tensor,
                         boundary_tensor,
                         args.boundary_width,
                     )
+                    padded_inputs["atmos_vars"][var_name] = _smooth_tensor_2d(padded, args.boundary_smooth_mode)
                 inputs = padded_inputs
                 static_data["static_vars"] = _pad_static_vars(static_data["static_vars"], args.boundary_width)
 
@@ -715,29 +797,52 @@ def evaluate(
                 # print(boundary_latitudes)
                 # exit()
 
-                # boundary_init 已被移到 device during prefetch; use directly
-                boundary_inside = {
-                    "surf_vars": {
-                        k: v
-                        for k, v in boundary_init["surf_vars"].items()
-                    },
-                    "atmos_vars": {
-                        k: v
-                        for k, v in boundary_init["atmos_vars"].items()
-                    },
-                }
-                
-                # 直接覆寫初始 inputs 裡面所有歷史時間步的四周邊界
-                for var_name, tensor in inputs["surf_vars"].items():
-                    # 配合 inputs 的維度 (Batch, Time, Lat, Lon)，將邊界張量增加 Time 維度並對齊
-                    b_tensor = boundary_inside["surf_vars"][var_name].unsqueeze(1).expand(-1, tensor.shape[1], -1, -1)
-                    inputs["surf_vars"][var_name] = _replace_boundary_inside(tensor, b_tensor, args.boundary_width)
-
+                if boundary_init is not None:
+                    # boundary_init 已被移到 device during prefetch; use directly
+                    boundary_inside = {
+                        "surf_vars": {
+                            k: v
+                            for k, v in boundary_init["surf_vars"].items()
+                        },
+                        "atmos_vars": {
+                            k: v
+                            for k, v in boundary_init["atmos_vars"].items()
+                        },
+                    }
                     
-                for var_name, tensor in inputs["atmos_vars"].items():
-                    # 配合 inputs 的維度 (Batch, Time, Level, Lat, Lon)，將邊界張量增加 Time 維度並對齊
-                    b_tensor = boundary_inside["atmos_vars"][var_name].unsqueeze(1).expand(-1, tensor.shape[1], -1, -1, -1)
-                    inputs["atmos_vars"][var_name] = _replace_boundary_inside(tensor, b_tensor, args.boundary_width)
+                    # 直接覆寫初始 inputs 裡面所有歷史時間步的四周邊界
+                    for var_name, tensor in inputs["surf_vars"].items():
+                        # 配合 inputs 的維度 (Batch, Time, Lat, Lon)，將邊界張量增加 Time 維度並對齊
+                        b_tensor = boundary_inside["surf_vars"][var_name].unsqueeze(1).expand(-1, tensor.shape[1], -1, -1)
+                        replaced = _replace_boundary_inside(tensor, b_tensor, args.boundary_width)
+                        if args.boundary_time_interp_mode == "exact":
+                            out_tensor = tensor.clone()
+                            for i in range(tensor.shape[0]):
+                                target_time = batch_times[i]
+                                base_time = base_times[i]
+                                offset_hours = (target_time - base_time) / pd.Timedelta(hours = 1)
+                                if abs(offset_hours % 6) < 1e-4:
+                                    out_tensor[i] = _smooth_tensor_2d(replaced[i:i+1], args.boundary_smooth_mode)[0]
+                            inputs["surf_vars"][var_name] = out_tensor
+                        else:
+                            inputs["surf_vars"][var_name] = _smooth_tensor_2d(replaced, args.boundary_smooth_mode)
+
+                        
+                    for var_name, tensor in inputs["atmos_vars"].items():
+                        # 配合 inputs 的維度 (Batch, Time, Level, Lat, Lon)，將邊界張量增加 Time 維度並對齊
+                        b_tensor = boundary_inside["atmos_vars"][var_name].unsqueeze(1).expand(-1, tensor.shape[1], -1, -1, -1)
+                        replaced = _replace_boundary_inside(tensor, b_tensor, args.boundary_width)
+                        if args.boundary_time_interp_mode == "exact":
+                            out_tensor = tensor.clone()
+                            for i in range(tensor.shape[0]):
+                                target_time = batch_times[i]
+                                base_time = base_times[i]
+                                offset_hours = (target_time - base_time) / pd.Timedelta(hours = 1)
+                                if abs(offset_hours % 6) < 1e-4:
+                                    out_tensor[i] = _smooth_tensor_2d(replaced[i:i+1], args.boundary_smooth_mode)[0]
+                            inputs["atmos_vars"][var_name] = out_tensor
+                        else:
+                            inputs["atmos_vars"][var_name] = _smooth_tensor_2d(replaced, args.boundary_smooth_mode)
             # ===================================================================================
 
             if boundary_enabled and args.boundary_mode == "pad-outside":
@@ -829,23 +934,29 @@ def evaluate(
                                 base_times,
                                 target_times,
                             )
-                        for var_name, tensor in boundary_step["surf_vars"].items():
-                            boundary_step["surf_vars"][var_name] = tensor.to(device, dtype = _pred.surf_vars[var_name].dtype)
-                        for var_name, tensor in boundary_step["atmos_vars"].items():
-                            boundary_step["atmos_vars"][var_name] = tensor.to(device, dtype = _pred.atmos_vars[var_name].dtype)
-                        boundary_step = _align_boundary_batch(boundary_step, flip_lat, flip_lon)
+                        if boundary_step is not None:
+                            for var_name, tensor in boundary_step["surf_vars"].items():
+                                boundary_step["surf_vars"][var_name] = tensor.to(device, dtype = _pred.surf_vars[var_name].dtype)
+                            for var_name, tensor in boundary_step["atmos_vars"].items():
+                                boundary_step["atmos_vars"][var_name] = tensor.to(device, dtype = _pred.atmos_vars[var_name].dtype)
+                            boundary_step = _align_boundary_batch(boundary_step, flip_lat, flip_lon)
                     else:
                         boundary_step = None
+
+                    # Determine slice width for error calculation
+                    slice_width = args.boundary_width
+                    if boundary_enabled and args.boundary_smooth_mode != "no":
+                        slice_width = args.boundary_width + args.boundary_smooth_width_adjustment
 
                     # 2. Calculate Loss immediately
                     if boundary_enabled and args.boundary_mode == "pad-outside":
                         pred_interior = Batch(
                             surf_vars = {
-                                k: _slice_interior(v, args.boundary_width)
+                                k: _slice_interior(v, slice_width)
                                 for k, v in _pred.surf_vars.items()
                             },
                             atmos_vars = {
-                                k: _slice_interior(v, args.boundary_width)
+                                k: _slice_interior(v, slice_width)
                                 for k, v in _pred.atmos_vars.items()
                             },
                             static_vars = static_data["static_vars"],
@@ -857,11 +968,50 @@ def evaluate(
                             ),
                         )
                         loss_pred = pred_interior
+                        loss_label = _label
+                    elif boundary_enabled and args.boundary_mode == "inject-inside" and slice_width > 0:
+                        pred_interior = Batch(
+                            surf_vars = {
+                                k: _slice_interior(v, slice_width)
+                                for k, v in _pred.surf_vars.items()
+                            },
+                            atmos_vars = {
+                                k: _slice_interior(v, slice_width)
+                                for k, v in _pred.atmos_vars.items()
+                            },
+                            static_vars = static_data["static_vars"],
+                            metadata = Metadata(
+                                lat = latitudes,
+                                lon = longitude,
+                                time = _label.metadata.time,
+                                atmos_levels = levels,
+                            ),
+                        )
+                        label_interior = Batch(
+                            surf_vars = {
+                                k: _slice_interior(v, slice_width)
+                                for k, v in _label.surf_vars.items()
+                            },
+                            atmos_vars = {
+                                k: _slice_interior(v, slice_width)
+                                for k, v in _label.atmos_vars.items()
+                            },
+                            static_vars = static_data["static_vars"],
+                            metadata = Metadata(
+                                lat = latitudes,
+                                lon = longitude,
+                                time = _label.metadata.time,
+                                atmos_levels = levels,
+                            ),
+                        )
+                        loss_pred = pred_interior
+                        loss_label = label_interior
                     else:
                         loss_pred = _pred
+                        loss_label = _label
 
                     for (criterion, err_agg) in zip(criterion_list, err_agg_list):
-                        loss_dict = criterion(loss_pred, _label)
+                        loss_dict = criterion(loss_pred, loss_label)
                         log_weather_variable_error_with_lead_time(
                             loss_dict,
                             t * args.lead_time,
@@ -887,27 +1037,70 @@ def evaluate(
                                     for k, v in boundary_step["atmos_vars"].items()
                                 },
                             }
+                            replaced_surf = {
+                                k: _replace_boundary_inside(v, boundary_inside["surf_vars"][k], args.boundary_width)
+                                for k, v in _pred.surf_vars.items()
+                            }
+                            replaced_atmos = {
+                                k: _replace_boundary_inside(v, boundary_inside["atmos_vars"][k], args.boundary_width)
+                                for k, v in _pred.atmos_vars.items()
+                            }
+                            
+                            pred_surf_vars = {}
+                            for k, v in _pred.surf_vars.items():
+                                replaced_v = replaced_surf[k]
+                                smoothed_v = _smooth_tensor_2d(replaced_v, args.boundary_smooth_mode)
+                                if args.boundary_time_interp_mode == "exact":
+                                    out_v = v.clone()
+                                    for i in range(v.shape[0]):
+                                        target_time = pd.Timestamp(dates[i]) + pd.Timedelta(hours = t * args.lead_time)
+                                        base_time = base_times[i]
+                                        offset_hours = (target_time - base_time) / pd.Timedelta(hours = 1)
+                                        if abs(offset_hours % 6) < 1e-4:
+                                            out_v[i] = smoothed_v[i]
+                                    pred_surf_vars[k] = out_v
+                                else:
+                                    pred_surf_vars[k] = smoothed_v
+                            
+                            pred_atmos_vars = {}
+                            for k, v in _pred.atmos_vars.items():
+                                replaced_v = replaced_atmos[k]
+                                smoothed_v = _smooth_tensor_2d(replaced_v, args.boundary_smooth_mode)
+                                if args.boundary_time_interp_mode == "exact":
+                                    out_v = v.clone()
+                                    for i in range(v.shape[0]):
+                                        target_time = pd.Timestamp(dates[i]) + pd.Timedelta(hours = t * args.lead_time)
+                                        base_time = base_times[i]
+                                        offset_hours = (target_time - base_time) / pd.Timedelta(hours = 1)
+                                        if abs(offset_hours % 6) < 1e-4:
+                                            out_v[i] = smoothed_v[i]
+                                    pred_atmos_vars[k] = out_v
+                                else:
+                                    pred_atmos_vars[k] = smoothed_v
+
                             pred_for_next = dataclasses.replace(
                                 _pred,
-                                surf_vars = {
-                                    k: _replace_boundary_inside(v, boundary_inside["surf_vars"][k], args.boundary_width)
-                                    for k, v in _pred.surf_vars.items()
-                                },
-                                atmos_vars = {
-                                    k: _replace_boundary_inside(v, boundary_inside["atmos_vars"][k], args.boundary_width)
-                                    for k, v in _pred.atmos_vars.items()
-                                },
+                                surf_vars = pred_surf_vars,
+                                atmos_vars = pred_atmos_vars,
                             )
                         else:
+                            replaced_surf = {
+                                k: _replace_boundary_inside(v, boundary_step["surf_vars"][k], args.boundary_width)
+                                for k, v in _pred.surf_vars.items()
+                            }
+                            replaced_atmos = {
+                                k: _replace_boundary_inside(v, boundary_step["atmos_vars"][k], args.boundary_width)
+                                for k, v in _pred.atmos_vars.items()
+                            }
                             pred_for_next = dataclasses.replace(
                                 _pred,
                                 surf_vars = {
-                                    k: _replace_boundary_inside(v, boundary_step["surf_vars"][k], args.boundary_width)
-                                    for k, v in _pred.surf_vars.items()
+                                    k: _smooth_tensor_2d(v, args.boundary_smooth_mode)
+                                    for k, v in replaced_surf.items()
                                 },
                                 atmos_vars = {
-                                    k: _replace_boundary_inside(v, boundary_step["atmos_vars"][k], args.boundary_width)
-                                    for k, v in _pred.atmos_vars.items()
+                                    k: _smooth_tensor_2d(v, args.boundary_smooth_mode)
+                                    for k, v in replaced_atmos.items()
                                 },
                             )
                     else:

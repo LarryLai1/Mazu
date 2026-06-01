@@ -25,6 +25,7 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
         enable_pooling: bool = False,
         interp_mode: str = "forward",
         use_cache: bool = False,
+        time_interp_mode: str = "interpolation",
     ) -> None:
         super().__init__()
         self.boundary_root_dir = boundary_root_dir
@@ -43,6 +44,9 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
         self.enable_pooling = enable_pooling
         self.interp_mode = interp_mode
         self.use_cache = use_cache
+        self.time_interp_mode = time_interp_mode
+        if self.time_interp_mode not in ("interpolation", "nearest", "exact"):
+            raise ValueError(f"Unsupported time_interp_mode: {self.time_interp_mode}")
         if self.interp_mode not in ("forward", "surrounding"):
             raise ValueError(f"Unsupported interp_mode: {self.interp_mode}")
         self.time_axis = pd.date_range(
@@ -170,13 +174,24 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
         self._cache_levels = first_source["levels"]
         # print(f"Cache built with {len(self._cache)} entries. Latitude shape: {self._cache_latitude.shape}, Longitude shape: {self._cache_longitude.shape}, Levels: {self._cache_levels}")
 
-    @staticmethod
     def _select_from_source(
+        self,
         time_values: pd.DatetimeIndex,
         tensor: torch.Tensor,
         target_time: pd.Timestamp,
     ) -> torch.Tensor:
         target_time = pd.Timestamp(target_time)
+        if self.time_interp_mode == "exact":
+            if target_time not in time_values:
+                return None
+            return tensor[time_values.get_loc(target_time)]
+
+        if self.time_interp_mode == "nearest":
+            diffs = np.abs(time_values - target_time)
+            nearest_idx = np.argmin(diffs)
+            return tensor[nearest_idx]
+
+        # Default: interpolation
         if target_time in time_values:
             return tensor[time_values.get_loc(target_time)]
 
@@ -237,19 +252,31 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
                 lon = longitude_slice,
             )
         else:
-            t1, t2 = self._choose_interp_times(time_values, target_time)
-            data_1 = ds[var_name].sel(
-                time = t1,
-                lat = latitude_slice,
-                lon = longitude_slice,
-            )
-            data_2 = ds[var_name].sel(
-                time = t2,
-                lat = latitude_slice,
-                lon = longitude_slice,
-            )
-            weight = (target_time - t1) / (t2 - t1)
-            data_array = data_1 + (data_2 - data_1) * float(weight)
+            if self.time_interp_mode == "exact":
+                return None
+            elif self.time_interp_mode == "nearest":
+                diffs = np.abs(time_values - target_time)
+                nearest_idx = np.argmin(diffs)
+                nearest_time = time_values[nearest_idx]
+                data_array = ds[var_name].sel(
+                    time = nearest_time,
+                    lat = latitude_slice,
+                    lon = longitude_slice,
+                )
+            else:
+                t1, t2 = self._choose_interp_times(time_values, target_time)
+                data_1 = ds[var_name].sel(
+                    time = t1,
+                    lat = latitude_slice,
+                    lon = longitude_slice,
+                )
+                data_2 = ds[var_name].sel(
+                    time = t2,
+                    lat = latitude_slice,
+                    lon = longitude_slice,
+                )
+                weight = (target_time - t1) / (t2 - t1)
+                data_array = data_1 + (data_2 - data_1) * float(weight)
 
         if level_dim in data_array.dims:
             data_array = data_array.sel({level_dim: self.levels})
@@ -309,18 +336,24 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
 
             for surface_var in self.surface_variables:
                 mapped_name = self.map_var_name_for_Aurora(surface_var)
-                result["surf_vars"][mapped_name] = self._select_from_source(
+                val = self._select_from_source(
                     time_values,
                     source["surf_vars"][mapped_name],
                     target_time,
                 )
+                if val is None:
+                    return None
+                result["surf_vars"][mapped_name] = val
 
             for upper_var in self.upper_variables:
-                result["atmos_vars"][upper_var] = self._select_from_source(
+                val = self._select_from_source(
                     time_values,
                     source["atmos_vars"][upper_var],
                     target_time,
                 )
+                if val is None:
+                    return None
+                result["atmos_vars"][upper_var] = val
             return result
 
         upper_path, surface_path = self._dt_to_path(base_time)
@@ -334,10 +367,14 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
             for surface_var in self.surface_variables:
                 mapped_name = self.map_var_name_for_Aurora(surface_var)
                 data = self._select_data_array_at_time(surface_nc, mapped_name, target_time)
+                if data is None:
+                    return None
                 result["surf_vars"][mapped_name] = data
 
             for upper_var in self.upper_variables:
                 data = self._select_data_array_at_time(upper_nc, upper_var, target_time)
+                if data is None:
+                    return None
                 result["atmos_vars"][upper_var] = data
 
         return result
@@ -424,6 +461,7 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
         enable_pooling: bool = False,
         interp_mode: str = "forward",
         use_cache: bool = False,
+        time_interp_mode: str = "interpolation",
     ) -> None:
         super().__init__()
         self.boundary_root_dir = boundary_root_dir
@@ -442,6 +480,9 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
         self.enable_pooling = enable_pooling
         self.interp_mode = interp_mode
         self.use_cache = use_cache
+        self.time_interp_mode = time_interp_mode
+        if self.time_interp_mode not in ("interpolation", "nearest", "exact"):
+            raise ValueError(f"Unsupported time_interp_mode: {self.time_interp_mode}")
         if self.interp_mode not in ("forward", "surrounding"):
             raise ValueError(f"Unsupported interp_mode: {self.interp_mode}")
         self.time_axis = pd.date_range(
@@ -562,6 +603,11 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
         tensor: torch.Tensor,
         target_prediction_timedelta_hours: float,
     ) -> torch.Tensor:
+        if self.time_interp_mode == "nearest" or self.time_interp_mode == "exact":
+            diffs = torch.abs(prediction_timedelta_hours - target_prediction_timedelta_hours)
+            nearest_idx = torch.argmin(diffs).item()
+            return tensor[nearest_idx]
+
         lower_idx, upper_idx, weight = self._prediction_timedelta_bracketing_indices(
             prediction_timedelta_hours,
             target_prediction_timedelta_hours,
@@ -797,6 +843,13 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
         target_time = pd.Timestamp(target_time)
         target_prediction_timedelta_hours = float((target_time - base_time) / pd.Timedelta(hours = 1))
         prediction_timedelta_hours = source["prediction_timedelta_hours"]
+
+        # Exact mode check
+        if self.time_interp_mode == "exact":
+            diffs = torch.abs(prediction_timedelta_hours - target_prediction_timedelta_hours)
+            min_diff = torch.min(diffs).item()
+            if min_diff > 1e-4:
+                return None
 
         result = {"surf_vars": {}, "atmos_vars": {}}
 

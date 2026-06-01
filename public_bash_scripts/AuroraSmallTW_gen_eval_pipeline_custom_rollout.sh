@@ -9,7 +9,6 @@ usage() {
     echo "  --boundary_width N       Boundary width (default: 2)" >&2
     echo "  --boundary_mode MODE     Boundary mode (default: inject-inside)" >&2
     echo "  --boundary_pooling MODE  Boundary pooling then reshape (default: no)" >&2
-    echo "  --boundary_use_cache     Preload boundary data into memory (default: off)" >&2
 }
 
 CUDA_VISIBLE_DEVICES_VALUE="0,1,2,3,4,5,6,7"
@@ -17,7 +16,9 @@ boundary_width=2
 boundary_mode="inject-inside"
 # boundary_pooling="yes"
 boundary_pooling="no"
-boundary_use_cache=""
+boundary_smooth_mode="no"
+boundary_smooth_width_adjustment=0
+boundary_time_interp_mode="interpolation"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -37,6 +38,18 @@ while [[ $# -gt 0 ]]; do
             boundary_pooling="$2"
             shift 2
             ;;
+        --boundary_smooth_mode)
+            boundary_smooth_mode="$2"
+            shift 2
+            ;;
+        --boundary_smooth_width_adjustment)
+            boundary_smooth_width_adjustment="$2"
+            shift 2
+            ;;
+        --boundary_time_interp_mode)
+            boundary_time_interp_mode="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -54,16 +67,15 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 MODEL_CKPT_FOLDER="/tmp3/b12902101/Mazu/checkpoint-50"
 MODEL_CKPT_PATH="${MODEL_CKPT_FOLDER}/model.safetensors"
 
-start_time="2020-07-01 00:00:00"
-# end_time="2020-07-04 23:00:00"
-end_time="2020-08-31 23:00:00"
+start_time="2020-08-01 00:00:00"
+end_time="2020-08-06 23:00:00"
 aurora_boundary_root="/tmp3/b12902101/earth2/outputs"
 era5_boundary_root="/tmp3/b12902101/era5_tw_forecast_3d"
 
 boundary_source="era5"
 # boundary_source="aurora"
 
-OUTPUT_FOLDER_NAME="/home/LarryLai/LAM_output/${boundary_source}_boundary${boundary_width}_${boundary_mode}_pooling${boundary_pooling}"
+OUTPUT_FOLDER_NAME="/tmp3/b12902101/LAM_output_1data/${boundary_source}_boundary${boundary_width}_${boundary_mode}_smooth_${boundary_smooth_mode}_interp_${boundary_time_interp_mode}"
 
 EXPERIMENT_ID=$(basename "$(dirname "$(dirname "$MODEL_CKPT_FOLDER")")")
 CKPT_NAME=$(basename "$MODEL_CKPT_FOLDER")
@@ -83,7 +95,7 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --boundary_root_dir "${boundary_root_dir}" \
     --checkpoint_path "${MODEL_CKPT_PATH}" \
     --batch_size 8 \
-    --num_workers 4 \
+    --num_workers 1 \
     --seed 1126 \
     --start_date_hour "${start_time}" \
     --end_date_hour "${end_time}" \
@@ -101,11 +113,13 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --boundary_mode ${boundary_mode} \
     --boundary_pooling ${boundary_pooling} \
     --boundary_source ${boundary_source} \
+    --boundary_smooth_mode "${boundary_smooth_mode}" \
+    --boundary_time_interp_mode "${boundary_time_interp_mode}" \
     --gpu_cache \
-    --eval_metric MSE MAE \
+    --eval_metric MSE \
     --csv_output_folder "${OUTPUT_FOLDER_NAME}" \
     --gen_result_folder "${OUTPUT_FOLDER_NAME}/preds" \
     --gpus "${CUDA_VISIBLE_DEVICES_VALUE}" \
     2>&1 | tee "${LOG_FILE}" \
 
-# --save_rollout_step 1 2 4 8 12 24 36 48 60 72 \
+    # --save_rollout_step $(seq 1 72)\

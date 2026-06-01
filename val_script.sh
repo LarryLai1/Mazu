@@ -5,18 +5,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_SCRIPT="${SCRIPT_DIR}/public_bash_scripts/AuroraSmallTW_gen_eval_pipeline_custom_rollout.sh"
 BOUNDARY_MODE="inject-inside"
 
-BOUNDARY_WIDTHS=(2 4 6 8)
-# GPU="0,2,3,5"
-# GPU="0,2,3"
-GPU="4,5"
+BOUNDARY_WIDTHS=(8)
+# BOUNDARY_WIDTHS=(2 6)
+# GPU="0,1,2,3,4,5"
+GPU="0,1,2"
+# GPU="4,5"
+
+"${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width 0 --boundary_mode "inject-inside" \
+        --boundary_pooling no --boundary_smooth_mode "no" \
+        --boundary_time_interp_mode exact
 
 pooling="no"
-for bw in "${BOUNDARY_WIDTHS[@]}"; do
-	log_file="${SCRIPT_DIR}/bash_outputs/val_bw${bw}_${BOUNDARY_MODE}_pooling_${pooling}.log"
-
-	mkdir -p "${SCRIPT_DIR}/bash_outputs"
-	echo "Starting boundary_width=${bw}, boundary_pooling=${pooling} on GPU ${GPU}..."
-	"${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width "${bw}" --boundary_mode "${BOUNDARY_MODE}" --boundary_pooling "${pooling}"
+for interp in "nearest" "exact"; do
+    for smooth in "no" "mean" "gaussian"; do
+        for bw in "${BOUNDARY_WIDTHS[@]}"; do
+            echo "Starting boundary_width=${bw}, boundary_smoothing=${smooth}, boundary_time_interp_mode=${interp} on GPU ${GPU}..."
+            "${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width "${bw}" --boundary_mode "${BOUNDARY_MODE}" \
+                --boundary_pooling "${pooling}" --boundary_smooth_mode "${smooth}" \
+                --boundary_time_interp_mode "${interp}"
+        done
+    done
 done
 
-echo "All jobs completed."
+TOTAL_TIME=$((SECONDS))
+echo "All jobs completed in ${TOTAL_TIME}s."
+notify_line "Aurora Inference" "Run Complete within ${TOTAL_TIME}s"
