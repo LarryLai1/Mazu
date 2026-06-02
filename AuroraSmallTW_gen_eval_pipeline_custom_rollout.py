@@ -21,7 +21,7 @@ from aurora import Batch, Metadata
 # from utils.custom_rollout import rollout_with_gpu
 from aurora.model.aurora import AuroraSmall
 from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora
-from datasets.BoundaryConditionDataset import BoundaryConditionDataset_Aurora, BoundaryConditionDataset_ERA5
+from datasets.BoundaryConditionDataset import BoundaryConditionDataset_Aurora, BoundaryConditionDataset_ERA5, BoundaryConditionDataset_GroundTruth
 from utils.metrics import AuroraMAELoss, AuroraMSELoss
 from utils.metrics import prepare_each_lead_time_agg
 
@@ -61,7 +61,7 @@ def parse_args():
         "--boundary_source",
         type = str,
         default = "aurora",
-        choices = ["aurora", "era5"],
+        choices = ["aurora", "era5", "ground_truth"],
         help = "Select boundary dataset source format.",
     )
     parser.add_argument(
@@ -271,6 +271,8 @@ def create_boundary_dataset(args):
     if prediction_timedeltas is None:
         if args.boundary_source == "era5":
             prediction_timedeltas = [0, 12]
+        elif args.boundary_source == "ground_truth":
+            prediction_timedeltas = [k * args.lead_time for k in range(args.rollout_step + 1)]
         else:
             prediction_timedeltas = [0, 6, 12]
 
@@ -281,6 +283,22 @@ def create_boundary_dataset(args):
 
     if args.boundary_source == "era5":
         return BoundaryConditionDataset_ERA5(
+            boundary_root_dir = args.boundary_root_dir,
+            start_date_hour = args.start_date_hour,
+            end_date_hour = args.end_date_hour,
+            upper_variables = args.upper_variables,
+            surface_variables = args.surface_variables,
+            levels = args.levels,
+            latitude = args.latitude,
+            longitude = args.longitude,
+            boundary_width = boundary_ds_width,
+            prediction_timedeltas = prediction_timedeltas,
+            enable_pooling = (args.boundary_pooling == "yes"),
+            use_cache = args.boundary_use_cache,
+            time_interp_mode = internal_time_interp_mode,
+        )
+    elif args.boundary_source == "ground_truth":
+        return BoundaryConditionDataset_GroundTruth(
             boundary_root_dir = args.boundary_root_dir,
             start_date_hour = args.start_date_hour,
             end_date_hour = args.end_date_hour,

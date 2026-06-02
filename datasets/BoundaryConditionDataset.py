@@ -900,3 +900,216 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
             result["datetime"] = date_hour.strftime("%Y-%m-%d %H:%M:%S")
 
         return result
+class BoundaryConditionDataset_GroundTruth(BoundaryConditionDataset_Aurora):
+    def _dt_to_path(self, date_hour: pd.Timestamp) -> tuple[str, str]:
+        dir_path = Path(self.boundary_root_dir) / date_hour.strftime(r"%Y/%Y%m/%Y%m%d")
+        name = date_hour.strftime(r"%Y%m%d%H")
+        return str(dir_path / f"{name}_upper.nc"), str(dir_path / f"{name}_sfc.nc")
+
+    def _load_boundary_source_from_files(self, base_time: pd.Timestamp) -> dict:
+        latitude_bounds, longitude_bounds = self._spatial_bounds()
+
+        time_values = []
+        surf_vars_list = {self.map_var_name_for_Aurora(v): [] for v in self.surface_variables}
+        atmos_vars_list = {v: [] for v in self.upper_variables}
+        
+        latitude_tensor = None
+        longitude_tensor = None
+        levels_tuple = None
+
+        for td in self.prediction_timedeltas:
+            target_time = base_time + td
+            upper_path, surface_path = self._dt_to_path(target_time)
+            
+            with xr.open_dataset(upper_path, decode_timedelta = True) as upper_nc, \
+                 xr.open_dataset(surface_path, decode_timedelta = True) as surface_nc:
+                upper_nc.load()
+                surface_nc.load()
+
+                time_values.append(target_time)
+
+                lat_name = "latitude" if "latitude" in upper_nc.coords else ("lat" if "lat" in upper_nc.coords else "latitude")
+                lon_name = "longitude" if "longitude" in upper_nc.coords else ("lon" if "lon" in upper_nc.coords else "longitude")
+                level_dim = "level" if "level" in upper_nc.dims else "pressure_level"
+
+                latitude_slice = self._build_coord_slice(upper_nc[lat_name].values, latitude_bounds)
+                longitude_slice = self._build_coord_slice(upper_nc[lon_name].values, longitude_bounds)
+
+                if latitude_tensor is None:
+                    latitude_tensor = torch.as_tensor(upper_nc[lat_name].sel({lat_name: latitude_slice}).values)
+                    longitude_tensor = torch.as_tensor(upper_nc[lon_name].sel({lon_name: longitude_slice}).values)
+                    levels_tuple = tuple(upper_nc[level_dim].sel({level_dim: self.levels}).values)
+
+                for surface_var in self.surface_variables:
+                    mapped_name = self.map_var_name_for_Aurora(surface_var)
+                    
+                    file_var = None
+                    for cand in [mapped_name, surface_var]:
+                        if cand in surface_nc.variables:
+                            file_var = cand
+                            break
+                    if file_var is None:
+                        raise KeyError(f"Variable {surface_var} not found in {surface_path}")
+                            
+                    data_array = surface_nc[file_var].sel({
+                        lat_name: latitude_slice,
+                        lon_name: longitude_slice,
+                    })
+                    if "time" in data_array.dims:
+                        data_array = data_array.isel(time=0)
+                    if "valid_time" in data_array.dims:
+                        data_array = data_array.isel(valid_time=0)
+                    tensor = torch.as_tensor(data_array.values)
+                    if self.enable_pooling:
+                        tensor = self._mean_pool_then_restore_spatial(tensor)
+                    surf_vars_list[mapped_name].append(tensor)
+
+                for upper_var in self.upper_variables:
+                    data_array = upper_nc[upper_var].sel({
+                        lat_name: latitude_slice,
+                        lon_name: longitude_slice,
+                    })
+                    if level_dim in data_array.dims:
+                        data_array = data_array.sel({level_dim: self.levels})
+                    if "time" in data_array.dims:
+                        data_array = data_array.isel(time=0)
+                    if "valid_time" in data_array.dims:
+                        data_array = data_array.isel(valid_time=0)
+                    tensor = torch.as_tensor(data_array.values)
+                    if self.enable_pooling:
+                        tensor = self._mean_pool_then_restore_spatial(tensor)
+                    atmos_vars_list[upper_var].append(tensor)
+
+        source = {
+            "time_values": pd.DatetimeIndex(time_values),
+            "latitude": latitude_tensor,
+            "longitude": longitude_tensor,
+            "levels": levels_tuple,
+            "surf_vars": {k: torch.stack(v, dim=0) for k, v in surf_vars_list.items()},
+            "atmos_vars": {k: torch.stack(v, dim=0) for k, v in atmos_vars_list.items()},
+        }
+        return source
+
+    def get_latitude_longitude(self):
+        if self.use_cache and self._cache_latitude is not None:
+            return self._cache_latitude, self._cache_longitude
+        
+        target_time = self.time_axis[0] + self.prediction_timedeltas[0]
+        upper_path, _ = self._dt_to_path(target_time)
+        latitude_bounds, longitude_bounds = self._spatial_bounds()
+        with xr.open_dataset(upper_path, decode_timedelta = True) as upper_nc:
+            upper_nc.load()
+            lat_name = "latitude" if "latitude" in upper_nc.coords else "lat"
+            lon_name = "longitude" if "longitude" in upper_nc.coords else "lon"
+            latitude_slice = self._build_coord_slice(upper_nc[lat_name].values, latitude_bounds)
+            longitude_slice = self._build_coord_slice(upper_nc[lon_name].values, longitude_bounds)
+            latitude = upper_nc[lat_name].sel({lat_name: latitude_slice}).values
+            longitude = upper_nc[lon_name].sel({lon_name: longitude_slice}).values
+        return torch.tensor(latitude), torch.tensor(longitude)
+
+    def get_levels(self):
+        if self.use_cache and self._cache_levels is not None:
+            return self._cache_levels
+        target_time = self.time_axis[0] + self.prediction_timedeltas[0]
+        upper_path, _ = self._dt_to_path(target_time)
+        with xr.open_dataset(upper_path, decode_timedelta = True) as upper_nc:
+            upper_nc.load()
+            level_dim = "level" if "level" in upper_nc.dims else "pressure_level"
+            levels = upper_nc[level_dim].values
+        return tuple(levels)
+
+    def get_base_time(self, target_time: pd.Timestamp) -> pd.Timestamp:
+        # Ground truth is exactly aligned to the current time, no need to floor to forecast cycles.
+        return pd.Timestamp(target_time)
+
+    def get_boundary_at_time(self, base_time: pd.Timestamp, target_time: pd.Timestamp) -> dict:
+        base_time = pd.Timestamp(base_time)
+        target_time = pd.Timestamp(target_time)
+        
+        if self.use_cache:
+            source = self._cache[base_time]
+            result = {"surf_vars": {}, "atmos_vars": {}}
+            for surface_var in self.surface_variables:
+                mapped_name = self.map_var_name_for_Aurora(surface_var)
+                val = self._select_from_source(source["time_values"], source["surf_vars"][mapped_name], target_time)
+                if val is None:
+                    return None
+                result["surf_vars"][mapped_name] = val
+
+            for upper_var in self.upper_variables:
+                val = self._select_from_source(source["time_values"], source["atmos_vars"][upper_var], target_time)
+                if val is None:
+                    return None
+                result["atmos_vars"][upper_var] = val
+            return result
+
+        upper_path, surface_path = self._dt_to_path(target_time)
+        result = {"surf_vars": {}, "atmos_vars": {}}
+        latitude_bounds, longitude_bounds = self._spatial_bounds()
+
+        with xr.open_dataset(upper_path, decode_timedelta = True) as upper_nc, \
+             xr.open_dataset(surface_path, decode_timedelta = True) as surface_nc:
+            upper_nc.load()
+            surface_nc.load()
+
+            lat_name = "latitude" if "latitude" in upper_nc.coords else ("lat" if "lat" in upper_nc.coords else "latitude")
+            lon_name = "longitude" if "longitude" in upper_nc.coords else ("lon" if "lon" in upper_nc.coords else "longitude")
+            level_dim = "level" if "level" in upper_nc.dims else "pressure_level"
+
+            latitude_slice = self._build_coord_slice(upper_nc[lat_name].values, latitude_bounds)
+            longitude_slice = self._build_coord_slice(upper_nc[lon_name].values, longitude_bounds)
+
+            for surface_var in self.surface_variables:
+                mapped_name = self.map_var_name_for_Aurora(surface_var)
+                file_var = None
+                for cand in [mapped_name, surface_var]:
+                    if cand in surface_nc.variables:
+                        file_var = cand
+                        break
+                if file_var is None: return None
+                        
+                data_array = surface_nc[file_var].sel({
+                    lat_name: latitude_slice,
+                    lon_name: longitude_slice,
+                })
+                if "time" in data_array.dims:
+                    data_array = data_array.isel(time=0)
+                if "valid_time" in data_array.dims:
+                    data_array = data_array.isel(valid_time=0)
+                tensor = torch.as_tensor(data_array.values)
+                if self.enable_pooling:
+                    tensor = self._mean_pool_then_restore_spatial(tensor)
+                result["surf_vars"][mapped_name] = tensor
+
+            for upper_var in self.upper_variables:
+                data_array = upper_nc[upper_var].sel({
+                    lat_name: latitude_slice,
+                    lon_name: longitude_slice,
+                })
+                if level_dim in data_array.dims:
+                    data_array = data_array.sel({level_dim: self.levels})
+                if "time" in data_array.dims:
+                    data_array = data_array.isel(time=0)
+                if "valid_time" in data_array.dims:
+                    data_array = data_array.isel(valid_time=0)
+                tensor = torch.as_tensor(data_array.values)
+                if self.enable_pooling:
+                    tensor = self._mean_pool_then_restore_spatial(tensor)
+                result["atmos_vars"][upper_var] = tensor
+
+        return result
+
+    def __getitem__(self, index: int) -> dict:
+        date_hour = self.time_axis[index]
+        source = self.get_boundary_source(date_hour)
+
+        result = {
+            "prediction_timedelta": torch.tensor(self.prediction_timedelta_hours, dtype = torch.int64),
+            "surf_vars": {var_name: tensor.clone() for var_name, tensor in source["surf_vars"].items()},
+            "atmos_vars": {var_name: tensor.clone() for var_name, tensor in source["atmos_vars"].items()},
+        }
+
+        if self.get_datetime:
+            result["datetime"] = date_hour.strftime("%Y-%m-%d %H:%M:%S")
+
+        return result

@@ -11,14 +11,10 @@ BOUNDARY_WIDTHS=(4 8)
 GPU="0,1,2,3"
 # GPU="4,5"
 
-"${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width 0 --boundary_mode "inject-inside" \
-        --boundary_pooling no --boundary_smooth_mode "no" \
-        --boundary_time_interp_mode exact
+
 
 pooling="no"
-# for interp in "nearest" "exact"; do
-#     for smooth in "mean" "gaussian"; do
-for interp in "interpolation"; do
+for interp in "interpolation" "nearest" "exact"; do
     for smooth in "no" "mean" "gaussian"; do
         for bw in "${BOUNDARY_WIDTHS[@]}"; do
             echo "Starting boundary_width=${bw}, boundary_smoothing=${smooth}, boundary_time_interp_mode=${interp} on GPU ${GPU}..."
@@ -29,17 +25,9 @@ for interp in "interpolation"; do
     done
 done
 
-for interp in "nearest" "exact"; do
-    for smooth in "no"; do
-        for bw in "${BOUNDARY_WIDTHS[@]}"; do
-            echo "Starting boundary_width=${bw}, boundary_smoothing=${smooth}, boundary_time_interp_mode=${interp} on GPU ${GPU}..."
-            "${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width "${bw}" --boundary_mode "${BOUNDARY_MODE}" \
-                --boundary_pooling "${pooling}" --boundary_smooth_mode "${smooth}" \
-                --boundary_time_interp_mode "${interp}"
-        done
-    done
-done
-
+# "${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width 0 --boundary_mode "inject-inside" \
+#         --boundary_pooling no --boundary_smooth_mode "no" \
+#         --boundary_time_interp_mode exact
 
 TOTAL_TIME=$((SECONDS))
 echo "All jobs completed in ${TOTAL_TIME}s."

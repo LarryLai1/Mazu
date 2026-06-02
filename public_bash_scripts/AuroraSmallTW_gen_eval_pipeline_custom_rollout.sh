@@ -71,11 +71,13 @@ start_time="2020-08-01 00:00:00"
 end_time="2020-08-06 23:00:00"
 aurora_boundary_root="/tmp3/b12902101/earth2/outputs"
 era5_boundary_root="/tmp3/b12902101/era5_tw_forecast_3d"
+ground_truth_root="/tmp3/yunye0121/era5_tw"
 
-boundary_source="era5"
+boundary_source="ground_truth"
+# boundary_source="era5"
 # boundary_source="aurora"
 
-OUTPUT_FOLDER_NAME="/tmp3/b12902101/LAM_output_preds/${boundary_source}_boundary${boundary_width}_${boundary_mode}_smooth_${boundary_smooth_mode}_interp_${boundary_time_interp_mode}"
+OUTPUT_FOLDER_NAME="/tmp3/b12902101/LAM_output_gd/${boundary_source}_boundary${boundary_width}_${boundary_mode}_smooth_${boundary_smooth_mode}_interp_${boundary_time_interp_mode}"
 
 EXPERIMENT_ID=$(basename "$(dirname "$(dirname "$MODEL_CKPT_FOLDER")")")
 CKPT_NAME=$(basename "$MODEL_CKPT_FOLDER")
@@ -83,6 +85,8 @@ LOG_FILE="./bash_outputs/${EXPERIMENT_ID}_${CKPT_NAME}.log"
 
 if [[ "${boundary_source}" == "era5" ]]; then
     boundary_root_dir="${era5_boundary_root}"
+elif [[ "${boundary_source}" == "ground_truth" ]]; then
+    boundary_root_dir="${ground_truth_root}"
 else
     boundary_root_dir="${aurora_boundary_root}"
 fi
