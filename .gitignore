@@ -9,6 +9,7 @@ Mazu_training_results/*
 my_validation_plots/*
 checkpoint-50/
 errs/
+*~
+plots*
 plots.zip
-plots/
-plots_out/
+public_bash_scripts/residual*

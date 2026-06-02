@@ -75,7 +75,7 @@ era5_boundary_root="/tmp3/b12902101/era5_tw_forecast_3d"
 boundary_source="era5"
 # boundary_source="aurora"
 
-OUTPUT_FOLDER_NAME="/tmp3/b12902101/LAM_output_1data/${boundary_source}_boundary${boundary_width}_${boundary_mode}_smooth_${boundary_smooth_mode}_interp_${boundary_time_interp_mode}"
+OUTPUT_FOLDER_NAME="/tmp3/b12902101/LAM_output_preds/${boundary_source}_boundary${boundary_width}_${boundary_mode}_smooth_${boundary_smooth_mode}_interp_${boundary_time_interp_mode}"
 
 EXPERIMENT_ID=$(basename "$(dirname "$(dirname "$MODEL_CKPT_FOLDER")")")
 CKPT_NAME=$(basename "$MODEL_CKPT_FOLDER")
@@ -118,8 +118,7 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --gpu_cache \
     --eval_metric MSE \
     --csv_output_folder "${OUTPUT_FOLDER_NAME}" \
+    --save_rollout_step $(seq 1 24) 36 48 60 72\
     --gen_result_folder "${OUTPUT_FOLDER_NAME}/preds" \
     --gpus "${CUDA_VISIBLE_DEVICES_VALUE}" \
     2>&1 | tee "${LOG_FILE}" \
-
-    # --save_rollout_step $(seq 1 72)\
