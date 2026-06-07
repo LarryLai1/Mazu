@@ -68,7 +68,7 @@ MODEL_CKPT_FOLDER="/tmp3/b12902101/Mazu/checkpoint-50"
 MODEL_CKPT_PATH="${MODEL_CKPT_FOLDER}/model.safetensors"
 
 start_time="2020-08-01 00:00:00"
-end_time="2020-08-01 23:00:00"
+end_time="2020-09-01 00:00:00"
 aurora_boundary_root="/tmp3/b12902101/earth2/outputs"
 era5_boundary_root="/tmp3/b12902101/era5_tw_forecast_3d"
 ground_truth_root="/tmp3/yunye0121/era5_tw"

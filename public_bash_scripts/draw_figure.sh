@@ -1,6 +1,6 @@
-root_dir="../LAM_output_2mo"
-# root_dir="../LAM_output"
-var_dir="../LAM_output_2mo"
+# root_dir="../LAM_output_2mo"
+root_dir="../LAM_output"
+var_dir="../LAM_output"
 suffix="MSE.csv"
 csv_paths=("${root_dir}/era5_boundary0_inject-inside_smooth_no_interp_exact/${suffix}")
 styles=("linestyle=-,linewidth=2")

@@ -693,6 +693,7 @@ def model_forward_with_latent_boundary(model, batch_main, batch_bc, args):
     
     if batch_bc is not None:
         x_bc, _ = prepare_and_encode(batch_bc)
+        # assert (x_bc == x_main).all(), "different x"
 
         B, L_tokens, D = x_main.shape
         latent_levels = model.encoder.latent_levels
@@ -707,14 +708,10 @@ def model_forward_with_latent_boundary(model, batch_main, batch_bc, args):
         latent_boundary_width = args.boundary_width // patch_size
         x_combined_grid = x_main_grid.clone()
         if latent_boundary_width > 0:
-            x_combined_grid[:, :, :latent_boundary_width, :, :] = 0
-            x_combined_grid[:, :, -latent_boundary_width:, :, :] = 0
-            x_combined_grid[:, :, :, :latent_boundary_width, :] = 0
-            x_combined_grid[:, :, :, -latent_boundary_width:, :] = 0
-            # x_combined_grid[:, :, :latent_boundary_width, :, :] = x_bc_grid[:, :, :latent_boundary_width, :, :]
-            # x_combined_grid[:, :, -latent_boundary_width:, :, :] = x_bc_grid[:, :, -latent_boundary_width:, :, :]
-            # x_combined_grid[:, :, :, :latent_boundary_width, :] = x_bc_grid[:, :, :, :latent_boundary_width, :]
-            # x_combined_grid[:, :, :, -latent_boundary_width:, :] = x_bc_grid[:, :, :, -latent_boundary_width:, :]
+            x_combined_grid[:, :, :latent_boundary_width, :, :] = x_bc_grid[:, :, :latent_boundary_width, :, :]
+            x_combined_grid[:, :, -latent_boundary_width:, :, :] = x_bc_grid[:, :, -latent_boundary_width:, :, :]
+            x_combined_grid[:, :, :, :latent_boundary_width, :] = x_bc_grid[:, :, :, :latent_boundary_width, :]
+            x_combined_grid[:, :, :, -latent_boundary_width:, :] = x_bc_grid[:, :, :, -latent_boundary_width:, :]
 
             # Smooth the replacement result over H and W dimensions in the latent grid
             if args.boundary_smooth_mode != "no":
@@ -959,9 +956,6 @@ def evaluate(
                     atmos_levels = levels,
                 ),
             )
-            # logger.info("Input shape: %s", _input.atmos_vars["t"].shape)
-            # # flush stdout
-            # sys.stdout.flush()
             
 
             assert model.training is False
@@ -987,21 +981,14 @@ def evaluate(
                     t = step_index + 1
 
                     if boundary_enabled:
-                        b_prev = prefetched_boundary[max(0, step_index - 1)]
                         b_curr = prefetched_boundary[step_index]
                         
                         surf_vars_history = {}
                         atmos_vars_history = {}
                         for var_name in b_curr["surf_vars"].keys():
-                            surf_vars_history[var_name] = torch.stack(
-                                [b_prev["surf_vars"][var_name], b_curr["surf_vars"][var_name]],
-                                dim = 1
-                            )
+                            surf_vars_history[var_name] = b_curr["surf_vars"][var_name].unsqueeze(1)
                         for var_name in b_curr["atmos_vars"].keys():
-                            atmos_vars_history[var_name] = torch.stack(
-                                [b_prev["atmos_vars"][var_name], b_curr["atmos_vars"][var_name]],
-                                dim = 1
-                            )
+                            atmos_vars_history[var_name] = b_curr["atmos_vars"][var_name].unsqueeze(1)
                             
                         boundary_batch = Batch(
                             surf_vars = surf_vars_history,
@@ -1010,7 +997,7 @@ def evaluate(
                             metadata = Metadata(
                                 lat = latitudes,
                                 lon = longitude,
-                                time = batch_times,
+                                time = rollout_batch.metadata.time,
                                 atmos_levels = levels,
                             ),
                         )

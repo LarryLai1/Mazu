@@ -47,8 +47,8 @@ def main():
     lat_arr = lat_arr.numpy()
     lon_arr = lon_arr.numpy()
 
-    for i in range(6):
-        init_time = pd.Timestamp("2020-08-01 06:00:00") + pd.Timedelta(hours=i)
+    for i in range(1):
+        init_time = pd.Timestamp("2020-08-01 00:00:00") + pd.Timedelta(hours=i)
         
         fig, axes = plt.subplots(7, 4, figsize=(20, 28))
         axes = axes.flatten()
