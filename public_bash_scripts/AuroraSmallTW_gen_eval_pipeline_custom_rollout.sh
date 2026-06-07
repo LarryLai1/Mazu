@@ -19,6 +19,7 @@ boundary_pooling="no"
 boundary_smooth_mode="no"
 boundary_smooth_width_adjustment=0
 boundary_time_interp_mode="interpolation"
+replace_boundary_position="encoder"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -50,6 +51,10 @@ while [[ $# -gt 0 ]]; do
             boundary_time_interp_mode="$2"
             shift 2
             ;;
+        --replace_boundary_position)
+            replace_boundary_position="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -75,9 +80,9 @@ ground_truth_root="/tmp3/yunye0121/era5_tw"
 
 # boundary_source="ground_truth"
 boundary_source="era5"
-# boundary_source="aurora"
 
-OUTPUT_FOLDER_NAME="/tmp3/b12902101/LAM_output/${boundary_source}_boundary${boundary_width}_${boundary_mode}_smooth_${boundary_smooth_mode}_interp_${boundary_time_interp_mode}"
+
+OUTPUT_FOLDER_NAME="/tmp3/b12902101/LAM_output/${boundary_source}_boundary${boundary_width}_${boundary_mode}_${boundary_smooth_mode}_${boundary_time_interp_mode}_${replace_boundary_position}"
 
 EXPERIMENT_ID=$(basename "$(dirname "$(dirname "$MODEL_CKPT_FOLDER")")")
 CKPT_NAME=$(basename "$MODEL_CKPT_FOLDER")
@@ -119,10 +124,12 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --boundary_source ${boundary_source} \
     --boundary_smooth_mode "${boundary_smooth_mode}" \
     --boundary_time_interp_mode "${boundary_time_interp_mode}" \
+    --replace_boundary_position "${replace_boundary_position}" \
     --gpu_cache \
     --eval_metric MSE \
     --csv_output_folder "${OUTPUT_FOLDER_NAME}" \
-    --save_rollout_step $(seq 1 24) 36 48 60 72\
     --gen_result_folder "${OUTPUT_FOLDER_NAME}/preds" \
     --gpus "${CUDA_VISIBLE_DEVICES_VALUE}" \
     2>&1 | tee "${LOG_FILE}" \
+
+    # --save_rollout_step $(seq 1 24) 36 48 60 72\

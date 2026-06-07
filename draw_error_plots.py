@@ -356,6 +356,81 @@ def main():
         plt.savefig(output_dir / fname, dpi=args.dpi)
         plt.close()
 
+    # Generate a combined 3x3 plot of the 9 key variables
+    # t2m (2t), msl, u10 (10u), v10 (10v), z_500, t_850, q_700, u_850, v_850
+    key_vars = ["2t", "msl", "10u", "10v", "z_500", "t_850", "q_700", "u_850", "v_850"]
+    key_vars_labels = {
+        "2t": "t2m",
+        "msl": "msl",
+        "10u": "u10",
+        "10v": "v10",
+        "z_500": "z_500",
+        "t_850": "t_850",
+        "q_700": "q_700",
+        "u_850": "u_850",
+        "v_850": "v_850",
+    }
+    available_key_vars = [v for v in key_vars if any(v in row_maps[p] for p in csv_paths)]
+    if available_key_vars:
+        fig, axes = plt.subplots(
+            3,
+            3,
+            figsize=(args.width * 3.0, args.height * 3.0),
+            sharex=True,
+            sharey=False,
+        )
+        axes_flat = axes.flatten()
+        any_data = False
+
+        for i, csv_var in enumerate(key_vars):
+            ax = axes_flat[i]
+            display_name = key_vars_labels[csv_var]
+            has_any = False
+
+            for p in csv_paths:
+                if csv_var not in row_maps[p]:
+                    continue
+
+                row = row_maps[p][csv_var]
+                time_cols = time_cols_by_file[p]
+                hours = hours_by_file[p]
+
+                y = pd.to_numeric(row[time_cols], errors="coerce").values
+                mask = pd.notna(y)
+                if not mask.any():
+                    continue
+
+                xs = [h for h, m in zip(hours, mask) if m]
+                ys = [val for val, m in zip(y, mask) if m]
+                if not xs:
+                    continue
+
+                plot_series(
+                    ax,
+                    xs,
+                    ys,
+                    label_by_file[p],
+                    style_by_file.get(p, {}),
+                    args,
+                )
+                has_any = True
+                any_data = True
+
+            ax.set_title(display_name)
+            ax.grid(True)
+            if i % 3 == 0:
+                ax.set_ylabel("loss value")
+            if i >= 6:
+                ax.set_xlabel("forecast hour")
+            if has_any:
+                ax.legend(loc="best", frameon=True)
+
+        if any_data:
+            fig.suptitle("Key Variables Error Comparison", fontsize=16)
+            fig.tight_layout()
+            fig.savefig(output_dir / f"combined_key_vars.{args.ext}", dpi=args.dpi)
+        plt.close(fig)
+
     # Optionally zip all images
     if args.zip:
         import shutil

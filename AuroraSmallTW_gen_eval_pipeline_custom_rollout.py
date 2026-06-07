@@ -96,6 +96,14 @@ def parse_args():
         help = "Preload all boundary files into memory and serve boundary data from cache.",
     )
     parser.add_argument(
+        "--replace_boundary_position",
+        type = str,
+        nargs = "+",
+        choices = ["encoder", "backbone"],
+        default = [],
+        help = "Select where to replace the boundary latents.",
+    )
+    parser.add_argument(
         "--gpu_cache",
         action = "store_true",
         help = "Enable GPU boundary cache and preload boundary files into memory.",
@@ -555,27 +563,27 @@ def _slice_interior(tensor, boundary_width):
         return tensor
     return tensor[..., boundary_width:-boundary_width, boundary_width:-boundary_width]
 
-def _smooth_tensor_2d(tensor, mode):
-    if mode == "no":
-        return tensor
-    orig_shape = tensor.shape
-    h, w = orig_shape[-2:]
-    flat_tensor = tensor.view(-1, 1, h, w)
-    if mode == "mean":
-        kernel = torch.ones((1, 1, 3, 3), dtype = tensor.dtype, device = tensor.device) / 9.0
-    elif mode == "gaussian":
-        kernel = torch.tensor([
-            [1.0, 2.0, 1.0],
-            [2.0, 4.0, 2.0],
-            [1.0, 2.0, 1.0]
-        ], dtype = tensor.dtype, device = tensor.device)
-        kernel = kernel / kernel.sum()
-        kernel = kernel.view(1, 1, 3, 3)
-    else:
-        raise ValueError(f"Unsupported smoothing mode: {mode}")
-    padded = F.pad(flat_tensor, (1, 1, 1, 1), mode = "replicate")
-    smoothed = F.conv2d(padded, kernel)
-    return smoothed.view(orig_shape)
+# def _smooth_tensor_2d(tensor, mode):
+#     if mode == "no":
+#         return tensor
+#     orig_shape = tensor.shape
+#     h, w = orig_shape[-2:]
+#     flat_tensor = tensor.view(-1, 1, h, w)
+#     if mode == "mean":
+#         kernel = torch.ones((1, 1, 3, 3), dtype = tensor.dtype, device = tensor.device) / 9.0
+#     elif mode == "gaussian":
+#         kernel = torch.tensor([
+#             [1.0, 2.0, 1.0],
+#             [2.0, 4.0, 2.0],
+#             [1.0, 2.0, 1.0]
+#         ], dtype = tensor.dtype, device = tensor.device)
+#         kernel = kernel / kernel.sum()
+#         kernel = kernel.view(1, 1, 3, 3)
+#     else:
+#         raise ValueError(f"Unsupported smoothing mode: {mode}")
+#     padded = F.pad(flat_tensor, (1, 1, 1, 1), mode = "replicate")
+#     smoothed = F.conv2d(padded, kernel)
+#     return smoothed.view(orig_shape)
 
 def _prepare_batch_for_rollout(model, batch):
     batch = model.batch_transform_hook(batch)
@@ -691,10 +699,11 @@ def model_forward_with_latent_boundary(model, batch_main, batch_bc, args):
 
     x_main, prepped_batch_main = prepare_and_encode(batch_main)
     
-    if batch_bc is not None:
+    x_bc = None
+    if batch_bc is not None and any(pos in args.replace_boundary_position for pos in ["encoder", "backbone"]):
         x_bc, _ = prepare_and_encode(batch_bc)
-        # assert (x_bc == x_main).all(), "different x"
-
+        
+    if x_bc is not None and "encoder" in args.replace_boundary_position:
         B, L_tokens, D = x_main.shape
         latent_levels = model.encoder.latent_levels
         patch_size = model.encoder.patch_size
@@ -774,6 +783,11 @@ def model_forward_with_latent_boundary(model, batch_main, batch_bc, args):
             lead_time=model.timestep,
             patch_res=patch_res,
             rollout_step=prepped_batch_main.metadata.rollout_step,
+            x_bc=x_bc if (x_bc is not None and "backbone" in args.replace_boundary_position) else None,
+            replace_boundary_position=args.replace_boundary_position,
+            boundary_width=args.boundary_width,
+            patch_size=model.encoder.patch_size,
+            boundary_smooth_mode=args.boundary_smooth_mode,
         )
 
     pred = model.decoder(
@@ -880,7 +894,7 @@ def evaluate(
 
             # Prefetch boundary data for all autoregressive steps and transfer to device
             prefetched_boundary = None
-            if boundary_enabled:
+            if boundary_enabled and args.replace_boundary_position != []:
                 prefetched_boundary = {}
                 if boundary_is_era5:
                     source_cache = gpu_boundary_cache if args.gpu_cache else {}
@@ -1201,6 +1215,7 @@ def _mp_worker_entry(rank, world_size, args):
 
 def main():
     args = parse_args()
+    print(args.replace_boundary_position)
     # print(args.csv_output_folder)
     # If user passed --gpus, parse into list and attach to args for worker mapping
     gpu_list = None

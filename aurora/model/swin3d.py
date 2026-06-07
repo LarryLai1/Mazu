@@ -1076,8 +1076,6 @@ class Swin3DTransformerBackbone(nn.Module):
 
         self.apply(init_weights)
 
-        # This must overwrite the initialisation of `AdaptiveLayerNorm` by
-        # `self.apply(init_weights)` above, so should be called afterwards.
         for bly in self.encoder_layers:
             bly.init_respostnorm()
         for bly in self.decoder_layers:
@@ -1105,6 +1103,11 @@ class Swin3DTransformerBackbone(nn.Module):
         lead_time: timedelta,
         rollout_step: int,
         patch_res: tuple[int, int, int],
+        x_bc: Optional[torch.Tensor] = None,
+        replace_boundary_position: Optional[list[str]] = None,
+        boundary_width: int = 0,
+        patch_size: int = 4,
+        boundary_smooth_mode: str = "no",
     ) -> torch.Tensor:
         """Run the backbone.
 
@@ -1113,6 +1116,11 @@ class Swin3DTransformerBackbone(nn.Module):
             lead_time (datetime.timedelta): Lead time.
             rollout_step (int): Roll-out step.
             patch_res (tuple[int, int, int]): Patch resolution of the form `(C, H, W)`.
+            x_bc (Optional[torch.Tensor]): Optional boundary condition input tokens of shape `(B, L, D)`.
+            replace_boundary_position (Optional[list[str]]): List of options to control boundary replacement.
+            boundary_width (int): Width of the boundary.
+            patch_size (int): Size of the patches.
+            boundary_smooth_mode (str): Smoothing mode for the boundary replacement.
 
         Returns:
             torch.Tensor: Output tokens of shape `(B, L, D)`.
@@ -1125,21 +1133,36 @@ class Swin3DTransformerBackbone(nn.Module):
         _msg = f"Patch height ({patch_res[0]}) must be divisible by ws[0] ({self.window_size[0]})"
         assert patch_res[0] % self.window_size[0] == 0, _msg
 
+        run_backbone_boundary = (
+            x_bc is not None 
+            and replace_boundary_position is not None 
+            and "backbone" in replace_boundary_position
+        )
+
         all_enc_res, padded_outs = self.get_encoder_specs(patch_res)
 
         lead_hours = lead_time / timedelta(hours=1)
-        lead_times = lead_hours * torch.ones(x.shape[0], dtype=torch.float32, device=x.device)
-        c = self.time_mlp(lead_time_expansion(lead_times, self.embed_dim).to(dtype=x.dtype))
+        
+        if run_backbone_boundary:
+            B = x.shape[0]
+            x_all = torch.cat([x, x_bc], dim=0)
+            lead_times = lead_hours * torch.ones(x_all.shape[0], dtype=torch.float32, device=x.device)
+        else:
+            x_all = x
+            lead_times = lead_hours * torch.ones(x.shape[0], dtype=torch.float32, device=x.device)
+            
+        c_all = self.time_mlp(lead_time_expansion(lead_times, self.embed_dim).to(dtype=x.dtype))
 
         skips = []
         for i, layer in enumerate(self.encoder_layers):
-            x, x_unscaled = layer(x, c, all_enc_res[i], rollout_step=rollout_step)
+            x_all, x_unscaled = layer(x_all, c_all, all_enc_res[i], rollout_step=rollout_step)
             skips.append(x_unscaled)
+            
         for i, layer in enumerate(self.decoder_layers):
             index = self.num_decoder_layers - i - 1
-            x, _ = layer(
-                x,
-                c,
+            x_all, _ = layer(
+                x_all,
+                c_all,
                 all_enc_res[index],
                 padded_outs[index - 1],
                 rollout_step=rollout_step,
@@ -1147,8 +1170,54 @@ class Swin3DTransformerBackbone(nn.Module):
 
             if 0 < i < self.num_decoder_layers - 1:
                 # For the intermediate stages, we use additive skip connections.
-                x = x + skips[index - 1]
+                x_all = x_all + skips[index - 1]
             elif i == self.num_decoder_layers - 1:
                 # For the last stage, we perform concatentation like in Pangu.
-                x = torch.cat([x, skips[0]], dim=-1)
+                if run_backbone_boundary:
+                    x_main = x_all[:B]
+                    x_bc_backbone = x_all[B:]
+                    
+                    C_latents, H_latents, W_latents = patch_res
+                    
+                    x_main_grid = x_main.view(B, C_latents, H_latents, W_latents, -1)
+                    x_bc_grid = x_bc_backbone.view(B, C_latents, H_latents, W_latents, -1)
+                    
+                    latent_boundary_width = boundary_width // patch_size
+                    x_combined_grid = x_main_grid.clone()
+                    if latent_boundary_width > 0:
+                        x_combined_grid[:, :, :latent_boundary_width, :, :] = x_bc_grid[:, :, :latent_boundary_width, :, :]
+                        x_combined_grid[:, :, -latent_boundary_width:, :, :] = x_bc_grid[:, :, -latent_boundary_width:, :, :]
+                        x_combined_grid[:, :, :, :latent_boundary_width, :] = x_bc_grid[:, :, :, :latent_boundary_width, :]
+                        x_combined_grid[:, :, :, -latent_boundary_width:, :] = x_bc_grid[:, :, :, -latent_boundary_width:, :]
+                        
+                        # Smooth the replacement result over H and W dimensions in the latent grid
+                        if boundary_smooth_mode != "no":
+                            import torch.nn.functional as F
+                            orig_shape = x_combined_grid.shape
+                            D_dim = x_combined_grid.shape[-1]
+                            permuted = x_combined_grid.permute(0, 1, 4, 2, 3)
+                            flat_tensor = permuted.reshape(-1, 1, H_latents, W_latents)
+                            
+                            if boundary_smooth_mode == "mean":
+                                kernel = torch.ones((1, 1, 3, 3), dtype = x_combined_grid.dtype, device = x_combined_grid.device) / 9.0
+                            elif boundary_smooth_mode == "gaussian":
+                                kernel = torch.tensor([
+                                    [1.0, 2.0, 1.0],
+                                    [2.0, 4.0, 2.0],
+                                    [1.0, 2.0, 1.0]
+                                ], dtype = x_combined_grid.dtype, device = x_combined_grid.device)
+                                kernel = kernel / kernel.sum()
+                                kernel = kernel.view(1, 1, 3, 3)
+                            else:
+                                raise ValueError(f"Unsupported smoothing mode: {boundary_smooth_mode}")
+                            
+                            padded = F.pad(flat_tensor, (1, 1, 1, 1), mode = "replicate")
+                            smoothed = F.conv2d(padded, kernel)
+                            restored = smoothed.view(B, C_latents, D_dim, H_latents, W_latents)
+                            x_combined_grid = restored.permute(0, 1, 3, 4, 2)
+                            
+                    x_main = x_combined_grid.view(B, -1, x_main.shape[-1])
+                    x = torch.cat([x_main, skips[0][:B]], dim=-1)
+                else:
+                    x = torch.cat([x_all, skips[0]], dim=-1)
         return x
