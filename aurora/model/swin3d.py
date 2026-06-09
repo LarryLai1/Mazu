@@ -1213,10 +1213,10 @@ class Swin3DTransformerBackbone(nn.Module):
                             
                             padded = F.pad(flat_tensor, (1, 1, 1, 1), mode = "replicate")
                             smoothed = F.conv2d(padded, kernel)
-                            restored = smoothed.view(B, C_latents, D_dim, H_latents, W_latents)
+                            restored = smoothed.reshape(B, C_latents, D_dim, H_latents, W_latents)
                             x_combined_grid = restored.permute(0, 1, 3, 4, 2)
                             
-                    x_main = x_combined_grid.view(B, -1, x_main.shape[-1])
+                    x_main = x_combined_grid.reshape(B, -1, x_main.shape[-1])
                     x = torch.cat([x_main, skips[0][:B]], dim=-1)
                 else:
                     x = torch.cat([x_all, skips[0]], dim=-1)
