@@ -238,7 +238,7 @@ def create_model(args, device):
     )
     if args.use_pretrained_weight:
         logger.info("Loading pretrained weights provided by Microsoft Aurora...")
-        model.load_checkpoint("microsoft/aurora", "aurora-0.25-small-pretrained.ckpt", strict = False)
+        model.load_checkpoint("microsoft/aurora", "aurora-0.25-small-pretrained.ckpt", strict = True)
     elif args.checkpoint_path:
         logger.info(f"Loading checkpoint: {args.checkpoint_path}")
 

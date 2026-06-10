@@ -12,7 +12,7 @@ usage() {
     echo "  --pred VALUE             Enable prediction mode (true/false, default: false)" >&2
 }
 
-CUDA_VISIBLE_DEVICES_VALUE="0,1,2,3,4,5,6,7"
+CUDA_VISIBLE_DEVICES_VALUE="0,1"
 boundary_width=2
 boundary_mode="inject-inside"
 # boundary_pooling="yes"
@@ -75,7 +75,7 @@ done
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 
-MODEL_CKPT_FOLDER="/tmp3/b12902101/Mazu/checkpoint-50"
+# MODEL_CKPT_FOLDER="/tmp3/b12902101/Mazu/checkpoint-50"
 MODEL_CKPT_PATH="/tmp2/yuanlim0919/lateral_smooth/model_weights/Aurora/model.safetensors"
 
 start_time="2020-07-01 00:00:00"
@@ -131,7 +131,7 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --latitude 39.75 5 \
     --longitude 100 144.75 \
     --lead_time 1 \
-    --input_time_window 1 \
+    --input_time_window 2 \
     --rollout_step 72 \
     --timestep_hours 1 \
     --boundary_width ${boundary_width} \
