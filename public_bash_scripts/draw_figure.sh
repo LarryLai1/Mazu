@@ -2,6 +2,8 @@
 root_dir="../LAM_output"
 var_dir="../LAM_output"
 suffix="MSE.csv"
+colors=("#FF0000" "#006000" "#00EC00" "#C07AB8")
+smooth_modes=("no" "mean" "gaussian" "linear")
 csv_paths=("${root_dir}/era5_boundary0_inject-inside_no_exact_encoder/${suffix}")
 styles=("linestyle=-,linewidth=2")
 legend_names=("Baseline")
@@ -18,20 +20,20 @@ if [ ! -d "${root_dir}/era5_boundary_data" ]; then
 fi
 
 csv_paths+=("${root_dir}/era5_boundary_data/${suffix}")
-legend_names+=("ERA5 boundary")
+legend_names+=("HRES")
 styles+=("linestyle=-,linewidth=2")
 
-for bd_position in "backbone" "encoder"; do
-    # for interp in "exact"; do
+for bd_position in "encoder" "backbone"; do
     for interp in "nearest"; do
-        # for smooth in "no"; do
-        for smooth in "no" "mean" "gaussian"; do
+        for index in 0; do
+        # for index in {0..3}; do
+            smooth=${smooth_modes[${index}]}
             csv_paths+=("${var_dir}/era5_boundary8_inject-inside_${smooth}_${interp}_${bd_position}/${suffix}")
             legend_names+=("Boundary 8 ${interp} ${smooth} ${bd_position}")
             if [ "${bd_position}" == "encoder" ]; then
-                styles+=("linestyle=--,linewidth=2")
+                styles+=("linestyle=--,linewidth=2,color=${colors[${index}]}")
             else
-                styles+=("linestyle=:,linewidth=2")
+                styles+=("linestyle=:,linewidth=2,color=${colors[${index}]}")
             fi
         done
     done
@@ -44,4 +46,4 @@ python draw_error_plots.py \
     --csv_paths "${csv_paths[@]}" \
     --legend_names "${legend_names[@]}" \
     --styles "${styles[@]}" \
-    --output_dir plots --ext png --dpi 150
+    --output_dir plots_encoder_decoder --ext png --dpi 150

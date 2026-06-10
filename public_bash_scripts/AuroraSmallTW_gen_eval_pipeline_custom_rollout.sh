@@ -4,11 +4,12 @@
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 usage() {
-    echo "Usage: $0 [--gpus GPU_IDS] [--boundary_width N] [--boundary_mode MODE]" >&2
+    echo "Usage: $0 [--gpus GPU_IDS] [--boundary_width N] [--boundary_mode MODE] [--pred true|false]" >&2
     echo "  --gpus GPU_IDS           CUDA_VISIBLE_DEVICES value (default: 3,4,5)" >&2
     echo "  --boundary_width N       Boundary width (default: 2)" >&2
     echo "  --boundary_mode MODE     Boundary mode (default: inject-inside)" >&2
     echo "  --boundary_pooling MODE  Boundary pooling then reshape (default: no)" >&2
+    echo "  --pred VALUE             Enable prediction mode (true/false, default: false)" >&2
 }
 
 CUDA_VISIBLE_DEVICES_VALUE="0,1,2,3,4,5,6,7"
@@ -20,9 +21,14 @@ boundary_smooth_mode="no"
 boundary_smooth_width_adjustment=0
 boundary_time_interp_mode="interpolation"
 replace_boundary_position="encoder"
+pred="false"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --pred)
+            pred="$2"
+            shift 2
+            ;;
         --gpus)
             CUDA_VISIBLE_DEVICES_VALUE="$2"
             shift 2
@@ -70,10 +76,18 @@ done
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 
 MODEL_CKPT_FOLDER="/tmp3/b12902101/Mazu/checkpoint-50"
-MODEL_CKPT_PATH="${MODEL_CKPT_FOLDER}/model.safetensors"
+MODEL_CKPT_PATH="/tmp2/yuanlim0919/lateral_smooth/model_weights/Aurora/model.safetensors"
 
-start_time="2020-08-01 00:00:00"
-end_time="2020-09-01 00:00:00"
+start_time="2020-07-01 00:00:00"
+if [[ "${pred}" == "true" ]]; then
+    end_time="2020-07-02 00:00:00"
+    extra_args=("--save_rollout_step" $(seq 1 24) 36 48 60 72)
+    output_root="/tmp3/b12902101/LAM_output_preds"
+else
+    end_time="2020-08-01 00:00:00"
+    extra_args=()
+    output_root="/tmp3/b12902101/LAM_output"
+fi
 # start_time="2020-12-31 00:00:00"
 # end_time="2020-12-31 23:00:00"
 aurora_boundary_root="/tmp3/b12902101/earth2/outputs"
@@ -84,7 +98,7 @@ ground_truth_root="/tmp3/yunye0121/era5_tw"
 boundary_source="era5"
 
 
-OUTPUT_FOLDER_NAME="/tmp3/b12902101/LAM_output/${boundary_source}_boundary${boundary_width}_${boundary_mode}_${boundary_smooth_mode}_${boundary_time_interp_mode}_${replace_boundary_position}"
+OUTPUT_FOLDER_NAME="${output_root}/${boundary_source}_boundary${boundary_width}_${boundary_mode}_${boundary_smooth_mode}_${boundary_time_interp_mode}_${replace_boundary_position}"
 
 EXPERIMENT_ID=$(basename "$(dirname "$(dirname "$MODEL_CKPT_FOLDER")")")
 CKPT_NAME=$(basename "$MODEL_CKPT_FOLDER")
@@ -132,6 +146,5 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --csv_output_folder "${OUTPUT_FOLDER_NAME}" \
     --gen_result_folder "${OUTPUT_FOLDER_NAME}/preds" \
     --gpus "${CUDA_VISIBLE_DEVICES_VALUE}" \
-    2>&1 | tee "${LOG_FILE}" \
-
-    # --save_rollout_step $(seq 1 24) 36 48 60 72\
+    "${extra_args[@]}" \
+    2>&1 | tee "${LOG_FILE}"

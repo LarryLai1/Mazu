@@ -74,7 +74,7 @@ def parse_args():
         "--boundary_smooth_mode",
         type = str,
         default = "no",
-        choices = ["no", "mean", "gaussian"],
+        choices = ["no", "mean", "gaussian", "linear"],
         help = "Apply 3x3 smoothing/pooling after boundary replacement.",
     )
     parser.add_argument(
@@ -717,40 +717,52 @@ def model_forward_with_latent_boundary(model, batch_main, batch_bc, args):
         latent_boundary_width = args.boundary_width // patch_size
         x_combined_grid = x_main_grid.clone()
         if latent_boundary_width > 0:
-            x_combined_grid[:, :, :latent_boundary_width, :, :] = x_bc_grid[:, :, :latent_boundary_width, :, :]
-            x_combined_grid[:, :, -latent_boundary_width:, :, :] = x_bc_grid[:, :, -latent_boundary_width:, :, :]
-            x_combined_grid[:, :, :, :latent_boundary_width, :] = x_bc_grid[:, :, :, :latent_boundary_width, :]
-            x_combined_grid[:, :, :, -latent_boundary_width:, :] = x_bc_grid[:, :, :, -latent_boundary_width:, :]
+            if args.boundary_smooth_mode == "linear":
+                h_coords = torch.arange(H_latents, device=x_main_grid.device)
+                w_coords = torch.arange(W_latents, device=x_main_grid.device)
+                dist_h = torch.minimum(h_coords, H_latents - 1 - h_coords)
+                dist_w = torch.minimum(w_coords, W_latents - 1 - w_coords)
+                dist_grid = torch.minimum(dist_h.unsqueeze(1), dist_w.unsqueeze(0))
+                
+                mask = 1.0 - dist_grid.float() / latent_boundary_width
+                mask = torch.clamp(mask, min=0.0, max=1.0)
+                mask_expanded = mask.view(1, 1, H_latents, W_latents, 1)
+                x_combined_grid = mask_expanded * x_bc_grid + (1.0 - mask_expanded) * x_main_grid
+            else:
+                x_combined_grid[:, :, :latent_boundary_width, :, :] = x_bc_grid[:, :, :latent_boundary_width, :, :]
+                x_combined_grid[:, :, -latent_boundary_width:, :, :] = x_bc_grid[:, :, -latent_boundary_width:, :, :]
+                x_combined_grid[:, :, :, :latent_boundary_width, :] = x_bc_grid[:, :, :, :latent_boundary_width, :]
+                x_combined_grid[:, :, :, -latent_boundary_width:, :] = x_bc_grid[:, :, :, -latent_boundary_width:, :]
 
-            # Smooth the replacement result over H and W dimensions in the latent grid
-            if args.boundary_smooth_mode != "no":
-                import torch.nn.functional as F
-                orig_shape = x_combined_grid.shape
-                # Permute to (B, latent_levels, D, H_latents, W_latents) so H, W are the last dimensions
-                permuted = x_combined_grid.permute(0, 1, 4, 2, 3)
-                # Reshape to flatten all dimensions except H_latents and W_latents
-                flat_tensor = permuted.reshape(-1, 1, H_latents, W_latents)
-                
-                if args.boundary_smooth_mode == "mean":
-                    kernel = torch.ones((1, 1, 3, 3), dtype = x_combined_grid.dtype, device = x_combined_grid.device) / 9.0
-                elif args.boundary_smooth_mode == "gaussian":
-                    kernel = torch.tensor([
-                        [1.0, 2.0, 1.0],
-                        [2.0, 4.0, 2.0],
-                        [1.0, 2.0, 1.0]
-                    ], dtype = x_combined_grid.dtype, device = x_combined_grid.device)
-                    kernel = kernel / kernel.sum()
-                    kernel = kernel.view(1, 1, 3, 3)
-                else:
-                    raise ValueError(f"Unsupported smoothing mode: {args.boundary_smooth_mode}")
-                
-                # Smooth only on H and W dimensions
-                padded = F.pad(flat_tensor, (1, 1, 1, 1), mode = "replicate")
-                smoothed = F.conv2d(padded, kernel)
-                
-                # Reshape and permute back to (B, latent_levels, H_latents, W_latents, D)
-                restored = smoothed.view(B, latent_levels, D, H_latents, W_latents)
-                x_combined_grid = restored.permute(0, 1, 3, 4, 2)
+                # Smooth the replacement result over H and W dimensions in the latent grid
+                if args.boundary_smooth_mode != "no":
+                    import torch.nn.functional as F
+                    orig_shape = x_combined_grid.shape
+                    # Permute to (B, latent_levels, D, H_latents, W_latents) so H, W are the last dimensions
+                    permuted = x_combined_grid.permute(0, 1, 4, 2, 3)
+                    # Reshape to flatten all dimensions except H_latents and W_latents
+                    flat_tensor = permuted.reshape(-1, 1, H_latents, W_latents)
+                    
+                    if args.boundary_smooth_mode == "mean":
+                        kernel = torch.ones((1, 1, 3, 3), dtype = x_combined_grid.dtype, device = x_combined_grid.device) / 9.0
+                    elif args.boundary_smooth_mode == "gaussian":
+                        kernel = torch.tensor([
+                            [1.0, 2.0, 1.0],
+                            [2.0, 4.0, 2.0],
+                            [1.0, 2.0, 1.0]
+                        ], dtype = x_combined_grid.dtype, device = x_combined_grid.device)
+                        kernel = kernel / kernel.sum()
+                        kernel = kernel.view(1, 1, 3, 3)
+                    else:
+                        raise ValueError(f"Unsupported smoothing mode: {args.boundary_smooth_mode}")
+                    
+                    # Smooth only on H and W dimensions
+                    padded = F.pad(flat_tensor, (1, 1, 1, 1), mode = "replicate")
+                    smoothed = F.conv2d(padded, kernel)
+                    
+                    # Reshape and permute back to (B, latent_levels, H_latents, W_latents, D)
+                    restored = smoothed.reshape(B, latent_levels, D, H_latents, W_latents)
+                    x_combined_grid = restored.permute(0, 1, 3, 4, 2)
 
         x_combined = x_combined_grid.reshape(B, L_tokens, D)
     else:
