@@ -168,7 +168,7 @@ def _manual_split_dataset(dataset, rank: int, world_size: int):
     indices = list(range(rank, len(dataset), world_size))
     return Subset(dataset, indices)
 
-def _build_metric_lists(args):
+def _build_metric_lists(args, total_count = None):
     criterion_list = []
     err_agg_list = []
     for metric in args.eval_metric:
@@ -187,6 +187,7 @@ def _build_metric_lists(args):
                 upper_variables = args.upper_variables,
                 levels = args.levels,
                 err_type = metric,
+                total_count = total_count,
             )
         )
     return criterion_list, err_agg_list
@@ -349,12 +350,17 @@ def create_boundary_dataset(args):
         time_interp_mode = internal_time_interp_mode,
     )
 
-def log_weather_variable_error_with_lead_time(loss_dict, t, lead_time_agg):
+def log_weather_variable_error_with_lead_time(loss_dict, t, lead_time_agg, rank):
     for v in loss_dict["surf_vars"]:
         lead_time_agg[t]["surf_vars"][v].update( loss_dict["surf_vars"][v] )
     for v in loss_dict["atmos_vars"]:
         for l in loss_dict["atmos_vars"][v]:
             lead_time_agg[t]["atmos_vars"][v][l].update( loss_dict["atmos_vars"][v][l] )
+            if v == "z" and l == 50 and t > 60 and rank == 0:
+                # print(f"{v}_{l}, {t}: {lead_time_agg[t]["atmos_vars"][v][l]}")
+                # print(f"loss_dict: {loss_dict["atmos_vars"][v][l].sum().item()}")
+                if str(loss_dict["atmos_vars"][v][l].sum().item()) == "nan":
+                    print(loss_dict["atmos_vars"][v][l])
 
 def slice_timeaxis(labels):
     timeaxis_length = next(iter(next(iter(labels.values())).values())).shape[1]
@@ -421,8 +427,13 @@ def _build_boundary_batch_from_era5_source(
     atmos_vars = {}
 
     for base_time, target_time in zip(base_times, target_times):
-        source = source_cache[base_time]
-        data = boundary_dataset.get_boundary_at_time_from_source(source, base_time, target_time)
+        if target_time < base_time:
+            hist_cycle = getattr(boundary_dataset, "forecast_cycle_hours", 12)
+            effective_base_time = base_time - pd.Timedelta(hours = hist_cycle)
+        else:
+            effective_base_time = base_time
+        source = source_cache[effective_base_time]
+        data = boundary_dataset.get_boundary_at_time_from_source(source, effective_base_time, target_time)
         if data is None:
             return None
         for var_name, tensor in data["surf_vars"].items():
@@ -444,14 +455,19 @@ def _build_boundary_batch_from_gpu_cache(
     atmos_vars = {}
 
     for base_time, target_time in zip(base_times, target_times):
-        source = gpu_cache[base_time]
+        if target_time < base_time:
+            hist_cycle = getattr(boundary_dataset, "forecast_cycle_hours", 12)
+            effective_base_time = base_time - pd.Timedelta(hours = hist_cycle)
+        else:
+            effective_base_time = base_time
+        source = gpu_cache[effective_base_time]
         time_values = source["time_values"]
 
         # Check exact mode for cached boundary
         if getattr(boundary_dataset, "time_interp_mode", "interpolation") == "exact":
             if "prediction_timedelta_hours" in source:
                 prediction_timedelta_hours = source["prediction_timedelta_hours"]
-                target_prediction_timedelta_hours = float((target_time - base_time) / pd.Timedelta(hours = 1))
+                target_prediction_timedelta_hours = float((target_time - effective_base_time) / pd.Timedelta(hours = 1))
                 diffs = torch.abs(prediction_timedelta_hours - target_prediction_timedelta_hours)
                 min_diff = torch.min(diffs).item()
                 if min_diff > 1e-4:
@@ -500,6 +516,17 @@ def _align_boundary_batch(boundary_batch, flip_lat: bool, flip_lon: bool, print_
     if print_debug:
         print(f"After alignment {next(iter(boundary_batch['surf_vars']))}: {boundary_batch['surf_vars'][next(iter(boundary_batch['surf_vars']))][..., lat_dim]}")
     return boundary_batch
+
+def _stack_boundary_time_window(single_steps):
+    if not single_steps or any(s is None for s in single_steps):
+        return None
+    surf_vars = {}
+    for var in single_steps[0]["surf_vars"]:
+        surf_vars[var] = torch.stack([s["surf_vars"][var] for s in single_steps], dim = 1)
+    atmos_vars = {}
+    for var in single_steps[0]["atmos_vars"]:
+        atmos_vars[var] = torch.stack([s["atmos_vars"][var] for s in single_steps], dim = 1)
+    return {"surf_vars": surf_vars, "atmos_vars": atmos_vars}
 
 def _center_crop_boundary(tensor, boundary_width):
     if boundary_width <= 0:
@@ -562,28 +589,6 @@ def _slice_interior(tensor, boundary_width):
     if boundary_width <= 0:
         return tensor
     return tensor[..., boundary_width:-boundary_width, boundary_width:-boundary_width]
-
-# def _smooth_tensor_2d(tensor, mode):
-#     if mode == "no":
-#         return tensor
-#     orig_shape = tensor.shape
-#     h, w = orig_shape[-2:]
-#     flat_tensor = tensor.view(-1, 1, h, w)
-#     if mode == "mean":
-#         kernel = torch.ones((1, 1, 3, 3), dtype = tensor.dtype, device = tensor.device) / 9.0
-#     elif mode == "gaussian":
-#         kernel = torch.tensor([
-#             [1.0, 2.0, 1.0],
-#             [2.0, 4.0, 2.0],
-#             [1.0, 2.0, 1.0]
-#         ], dtype = tensor.dtype, device = tensor.device)
-#         kernel = kernel / kernel.sum()
-#         kernel = kernel.view(1, 1, 3, 3)
-#     else:
-#         raise ValueError(f"Unsupported smoothing mode: {mode}")
-#     padded = F.pad(flat_tensor, (1, 1, 1, 1), mode = "replicate")
-#     smoothed = F.conv2d(padded, kernel)
-#     return smoothed.view(orig_shape)
 
 def _prepare_batch_for_rollout(model, batch):
     batch = model.batch_transform_hook(batch)
@@ -883,6 +888,9 @@ def evaluate(
     # Optimization: Use inference_mode to reduce memory for gradients
     with torch.inference_mode():
         for batch in tqdm(dataloader, desc = f"Evaluating(rank={rank})", disable = (rank != 0)):
+        # for batch in dataloader:
+            # if (rank == 0):
+            #     print("----------------------------------------")
             inputs, labels, dates = batch
             
             # --- Data moving to device ---
@@ -904,12 +912,23 @@ def evaluate(
             if boundary_enabled:
                 base_times = tuple(boundary_dataset.get_base_time(t) for t in batch_times)
 
-            # Prefetch boundary data for all autoregressive steps and transfer to device
+            # Prefetch boundary data for all autoregressive steps and transfer to device.
+            # For input_time_window > 1, each entry prefetched_boundary[k] is a multi-timestep
+            # boundary with tensors of shape [B, T, ...], where T = input_time_window.
+            # The T time-steps correspond to offsets (in hours from date):
+            #   [ k*lead_time - (W-1)*timestep_hours,  ...,  k*lead_time ]
+            # where W = input_time_window.  For historical steps (k*lead_time - n*timestep_hours < 0)
+            # the target time can be negative relative to base_time — boundary_dataset is
+            # expected to handle this gracefully (analysis data that pre-dates the rollout).
             prefetched_boundary = None
             if boundary_enabled and args.replace_boundary_position != []:
                 prefetched_boundary = {}
+                _input_tw = getattr(args, 'input_time_window', 1)
+                _ts_hours = getattr(args, 'timestep_hours', 6)
+
                 if boundary_is_era5:
                     source_cache = gpu_boundary_cache if args.gpu_cache else {}
+                    hist_cycle = getattr(boundary_dataset, "forecast_cycle_hours", 12)
                     for base_time in set(base_times):
                         _get_boundary_source_on_device(
                             boundary_dataset,
@@ -917,56 +936,85 @@ def evaluate(
                             source_cache,
                             device,
                         )
-                    for k in range(0, args.rollout_step + 1):
-                        target_times_k = tuple(
-                            pd.Timestamp(d) + pd.Timedelta(hours = k * args.lead_time)
-                            for d in dates
-                        )
-                        b_step = _build_boundary_batch_from_era5_source(
+                        _get_boundary_source_on_device(
                             boundary_dataset,
+                            base_time - pd.Timedelta(hours = hist_cycle),
                             source_cache,
-                            base_times,
-                            target_times_k,
+                            device,
                         )
-                        b_step = _align_boundary_batch(b_step, flip_lat, flip_lon)
-                        prefetched_boundary[k] = b_step
+                    for k in range(0, args.rollout_step + 1):
+                        # Collect W single-step batches (oldest → newest)
+                        single_steps = []
+                        for tw in range(_input_tw - 1, -1, -1):  # W-1 down to 0
+                            offset_hours = k * args.lead_time - tw * _ts_hours
+                            target_times_k = tuple(
+                                pd.Timestamp(d) + pd.Timedelta(hours=offset_hours)
+                                for d in dates
+                            )
+                            b_single = _build_boundary_batch_from_era5_source(
+                                boundary_dataset,
+                                source_cache,
+                                base_times,
+                                target_times_k,
+                            )
+                            b_single = _align_boundary_batch(b_single, flip_lat, flip_lon)
+                            single_steps.append(b_single)
+                        prefetched_boundary[k] = _stack_boundary_time_window(single_steps)
+
                 elif args.gpu_cache:
+                    hist_cycle = getattr(boundary_dataset, "forecast_cycle_hours", 12)
                     for base_time in set(base_times):
                         _get_boundary_source_on_device(
                             boundary_dataset,
                             base_time,
+                            gpu_boundary_cache,
+                            device,
+                        )
+                        _get_boundary_source_on_device(
+                            boundary_dataset,
+                            base_time - pd.Timedelta(hours = hist_cycle),
                             gpu_boundary_cache,
                             device,
                         )
                     # include initial step k=0 (current time) and future steps 1..rollout_step
                     for k in range(0, args.rollout_step + 1):
-                        target_times_k = tuple(
-                            pd.Timestamp(d) + pd.Timedelta(hours = k * args.lead_time)
-                            for d in dates
-                        )
-                        b_step = _build_boundary_batch_from_gpu_cache(
-                            boundary_dataset,
-                            gpu_boundary_cache,
-                            base_times,
-                            target_times_k,
-                        )
-                        b_step = _align_boundary_batch(b_step, flip_lat, flip_lon)
-                        prefetched_boundary[k] = b_step
+                        single_steps = []
+                        for tw in range(_input_tw - 1, -1, -1):
+                            offset_hours = k * args.lead_time - tw * _ts_hours
+                            target_times_k = tuple(
+                                pd.Timestamp(d) + pd.Timedelta(hours=offset_hours)
+                                for d in dates
+                            )
+                            b_single = _build_boundary_batch_from_gpu_cache(
+                                boundary_dataset,
+                                gpu_boundary_cache,
+                                base_times,
+                                target_times_k,
+                            )
+                            b_single = _align_boundary_batch(b_single, flip_lat, flip_lon)
+                            single_steps.append(b_single)
+                        prefetched_boundary[k] = _stack_boundary_time_window(single_steps)
+
                 else:
                     # include initial step k=0 (current time) and future steps 1..rollout_step
                     for k in range(0, args.rollout_step + 1):
-                        target_times_k = tuple(
-                            pd.Timestamp(d) + pd.Timedelta(hours = k * args.lead_time)
-                            for d in dates
-                        )
-                        b_step = _build_boundary_batch(boundary_dataset, base_times, target_times_k)
-                        b_step = _align_boundary_batch(b_step, flip_lat, flip_lon)
-                        # Move to device (keep as float/dtype default) to avoid host->device during rollout
-                        for var_name, tensor in b_step["surf_vars"].items():
-                            b_step["surf_vars"][var_name] = tensor.to(device)
-                        for var_name, tensor in b_step["atmos_vars"].items():
-                            b_step["atmos_vars"][var_name] = tensor.to(device)
-                        prefetched_boundary[k] = b_step
+                        single_steps = []
+                        for tw in range(_input_tw - 1, -1, -1):
+                            offset_hours = k * args.lead_time - tw * _ts_hours
+                            target_times_k = tuple(
+                                pd.Timestamp(d) + pd.Timedelta(hours=offset_hours)
+                                for d in dates
+                            )
+                            b_single = _build_boundary_batch(boundary_dataset, base_times, target_times_k)
+                            b_single = _align_boundary_batch(b_single, flip_lat, flip_lon)
+                            # Move to device to avoid host->device during rollout
+                            if b_single is not None:
+                                for var_name, tensor in b_single["surf_vars"].items():
+                                    b_single["surf_vars"][var_name] = tensor.to(device)
+                                for var_name, tensor in b_single["atmos_vars"].items():
+                                    b_single["atmos_vars"][var_name] = tensor.to(device)
+                            single_steps.append(b_single)
+                        prefetched_boundary[k] = _stack_boundary_time_window(single_steps)
 
             metadata_lat = latitudes
             metadata_lon = longitude
@@ -1008,23 +1056,20 @@ def evaluate(
 
                     if boundary_enabled:
                         b_curr = prefetched_boundary[step_index]
-                        
-                        surf_vars_history = {}
-                        atmos_vars_history = {}
-                        for var_name in b_curr["surf_vars"].keys():
-                            surf_vars_history[var_name] = b_curr["surf_vars"][var_name].unsqueeze(1)
-                        for var_name in b_curr["atmos_vars"].keys():
-                            atmos_vars_history[var_name] = b_curr["atmos_vars"][var_name].unsqueeze(1)
-                            
+
+                        # b_curr tensors already have shape [B, T, ...] where T = input_time_window
+                        # (stacked by _stack_boundary_time_window during prefetch).
+                        # For T=1 (input_time_window=1) this is equivalent to the old .unsqueeze(1) path.
                         boundary_batch = Batch(
-                            surf_vars = surf_vars_history,
-                            atmos_vars = atmos_vars_history,
+                            surf_vars = b_curr["surf_vars"],
+                            atmos_vars = b_curr["atmos_vars"],
                             static_vars = static_data["static_vars"],
                             metadata = Metadata(
                                 lat = latitudes,
                                 lon = longitude,
                                 time = rollout_batch.metadata.time,
                                 atmos_levels = levels,
+                                rollout_step = rollout_batch.metadata.rollout_step,
                             ),
                         )
                         _pred = model_forward_with_latent_boundary(model, rollout_batch, boundary_batch, args)
@@ -1073,6 +1118,7 @@ def evaluate(
                                 lon = longitude,
                                 time = _label.metadata.time,
                                 atmos_levels = levels,
+                                rollout_step = _pred.metadata.rollout_step,
                             ),
                         )
                         label_interior = Batch(
@@ -1104,6 +1150,7 @@ def evaluate(
                             loss_dict,
                             t * args.lead_time,
                             err_agg,
+                            rank
                         )
 
                     # 3. Save to disk if needed (then discard from memory)
@@ -1125,7 +1172,22 @@ def evaluate(
                             k: torch.cat([rollout_batch.atmos_vars[k][:, 1:], v], dim = 1)
                             for k, v in pred_for_next.atmos_vars.items()
                         },
+                        metadata = Metadata(
+                            lat = latitudes,
+                            lon = longitude,
+                            time = tuple(
+                                map(
+                                    lambda d: pd.Timestamp(d) + pd.Timedelta(hours = t * args.lead_time),
+                                    dates,
+                                )
+                            ),
+                            atmos_levels = levels,
+                            rollout_step = t,
+                        ),
                     )
+
+            if boundary_enabled:
+                gpu_boundary_cache.clear()
 
 def export_agg_to_csv(
         args,
@@ -1198,7 +1260,7 @@ def _mp_worker_entry(rank, world_size, args):
         num_workers = args.num_workers,
         pin_memory = True,
     )
-    criterion_list, err_agg_list = _build_metric_lists(args)
+    criterion_list, err_agg_list = _build_metric_lists(args, total_count = len(full_dataset))
 
     evaluate(
         args,
@@ -1227,7 +1289,7 @@ def _mp_worker_entry(rank, world_size, args):
 
 def main():
     args = parse_args()
-    print(args.replace_boundary_position)
+    print(args)
     # print(args.csv_output_folder)
     # If user passed --gpus, parse into list and attach to args for worker mapping
     gpu_list = None
@@ -1255,7 +1317,7 @@ def main():
         dataset = create_dataset(args)
         boundary_dataset = create_boundary_dataset(args)
         dataloader = DataLoader(dataset, batch_size = args.batch_size, shuffle = False, num_workers = args.num_workers, pin_memory = True)
-        criterion_list, err_agg_list = _build_metric_lists(args)
+        criterion_list, err_agg_list = _build_metric_lists(args, total_count = len(dataset))
 
         evaluate(
             args,
@@ -1293,7 +1355,8 @@ def main():
         if p.exitcode != 0:
             raise RuntimeError(f"Worker process failed with exit code {p.exitcode}.")
 
-    _, merged_err_agg_list = _build_metric_lists(args)
+    full_dataset = create_dataset(args)
+    _, merged_err_agg_list = _build_metric_lists(args, total_count = len(full_dataset))
     tmp_root = Path(args.csv_output_folder) if args.csv_output_folder is not None else Path(args.gen_result_folder)
     for rank in range(world_size):
         p = tmp_root / f".mp_rank_{rank}_metrics.json"

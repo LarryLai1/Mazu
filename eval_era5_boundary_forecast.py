@@ -53,7 +53,7 @@ def parse_args():
                         help="List of forecast lead times in hours. If not specified, all available in files will be used.")
     parser.add_argument('--time_interp_mode', type=str, default="nearest", choices=["interpolation", "nearest", "exact"],
                         help="Time interpolation mode (exact requires matching ground truth target time exactly).")
-    parser.add_argument('--eval_metric', type=str, nargs='+', default=["MSE"], choices=["MSE", "MAE"])
+    parser.add_argument('--eval_metric', type=str, nargs='+', default=["MSE", "MAE"], choices=["MSE", "MAE"])
     parser.add_argument('--seed', type=int, default=1126)
     parser.add_argument('--mp_world_size', type=int, default=None)
     parser.add_argument('--gpus', type=str, default=None,

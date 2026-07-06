@@ -1,21 +1,24 @@
-# root_dir="../LAM_output_2mo"
 root_dir="../LAM_output"
 var_dir="../LAM_output"
-suffix="MSE.csv"
+suffix="MAE.csv"
 colors=("#FF0000" "#006000" "#00EC00" "#C07AB8")
 smooth_modes=("no" "mean" "gaussian" "linear")
-csv_paths=("${root_dir}/era5_boundary0_inject-inside_no_exact_encoder/${suffix}")
-styles=("linestyle=-,linewidth=2")
-legend_names=("Baseline")
+# csv_paths=("${root_dir}/era5_boundary0_inject-inside_no_exact_encoder/${suffix}")
+# styles=("linestyle=-,linewidth=2")
+# legend_names=("Baseline")
+csv_paths=()
+styles=()
+legend_names=()
 
-# if doesn't exist directory era5_boundary_data, run eval_era5_boundary_forecast.py
-if [ ! -d "${root_dir}/era5_boundary_data" ]; then
+# if doesn't exist era5_boundary_data MAE csv, run eval_era5_boundary_forecast.py
+if [ ! -f "${root_dir}/era5_boundary_data/MAE.csv" ]; then
     python eval_era5_boundary_forecast.py \
         --boundary_root_dir "/tmp3/b12902101/era5_tw_forecast_3d" \
         --data_root_dir "/tmp3/yunye0121/era5_tw" \
-        --start_date_hour "2020-08-01 00:00:00" \
+        --start_date_hour "2020-07-01 00:00:00" \
         --end_date_hour "2020-09-01 00:00:00" \
         --csv_output_folder ${root_dir}/era5_boundary_data \
+        --eval_metric "MAE" \
         --gpus 7
 fi
 
@@ -23,10 +26,10 @@ csv_paths+=("${root_dir}/era5_boundary_data/${suffix}")
 legend_names+=("HRES")
 styles+=("linestyle=-,linewidth=2")
 
-for bd_position in "encoder" "backbone"; do
+for bd_position in "backbone" "encoder"; do
     for interp in "nearest"; do
-        for index in 0; do
-        # for index in {0..3}; do
+        # for index in {0,3}; do
+        for index in 0 1; do
             smooth=${smooth_modes[${index}]}
             csv_paths+=("${var_dir}/era5_boundary8_inject-inside_${smooth}_${interp}_${bd_position}/${suffix}")
             legend_names+=("Boundary 8 ${interp} ${smooth} ${bd_position}")
@@ -46,4 +49,4 @@ python draw_error_plots.py \
     --csv_paths "${csv_paths[@]}" \
     --legend_names "${legend_names[@]}" \
     --styles "${styles[@]}" \
-    --output_dir plots_encoder_decoder --ext png --dpi 150
+    --output_dir plots --ext png --dpi 150

@@ -1197,6 +1197,10 @@ class Swin3DTransformerBackbone(nn.Module):
                             mask_expanded = mask.view(1, 1, H_latents, W_latents, 1)
                             x_combined_grid = mask_expanded * x_bc_grid + (1.0 - mask_expanded) * x_main_grid
                         else:
+                            # x_combined_grid[:, :, :latent_boundary_width, :, :] = 0
+                            # x_combined_grid[:, :, -latent_boundary_width:, :, :] = 0
+                            # x_combined_grid[:, :, :, :latent_boundary_width, :] = 0
+                            # x_combined_grid[:, :, :, -latent_boundary_width:, :] = 0
                             x_combined_grid[:, :, :latent_boundary_width, :, :] = x_bc_grid[:, :, :latent_boundary_width, :, :]
                             x_combined_grid[:, :, -latent_boundary_width:, :, :] = x_bc_grid[:, :, -latent_boundary_width:, :, :]
                             x_combined_grid[:, :, :, :latent_boundary_width, :] = x_bc_grid[:, :, :, :latent_boundary_width, :]

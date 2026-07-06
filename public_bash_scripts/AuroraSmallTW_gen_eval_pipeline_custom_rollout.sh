@@ -1,5 +1,6 @@
 #!/bin/bash
 # Singe_GPU inference script for AuroraTW weather model.
+set -eo pipefail
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
@@ -75,16 +76,17 @@ done
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 
-# MODEL_CKPT_FOLDER="/tmp3/b12902101/Mazu/checkpoint-50"
 MODEL_CKPT_PATH="/tmp2/yuanlim0919/lateral_smooth/model_weights/Aurora/model.safetensors"
 
-start_time="2020-07-01 00:00:00"
+start_time="2020-03-01 00:00:00"
 if [[ "${pred}" == "true" ]]; then
-    end_time="2020-07-02 00:00:00"
-    extra_args=("--save_rollout_step" $(seq 1 24) 36 48 60 72)
+    # end_time="2020-04-01 00:00:00"
+    end_time="2020-03-02 00:00:00"
+    extra_args=("--save_rollout_step" 72)
+    # extra_args=("--save_rollout_step" $(seq 1 24) 36 48 60 72)
     output_root="/tmp3/b12902101/LAM_output_preds"
 else
-    end_time="2020-08-01 00:00:00"
+    end_time="2020-04-01 00:00:00"
     extra_args=()
     output_root="/tmp3/b12902101/LAM_output"
 fi
@@ -116,7 +118,7 @@ touch "${LOG_FILE}"
 
 time \
 python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
-    --data_root_dir /tmp3/yunye0121/era5_tw \
+    --data_root_dir /work/yunye0121/era5_tw \
     --boundary_root_dir "${boundary_root_dir}" \
     --checkpoint_path "${MODEL_CKPT_PATH}" \
     --batch_size 8 \
@@ -142,9 +144,9 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --boundary_time_interp_mode "${boundary_time_interp_mode}" \
     --replace_boundary_position "${replace_boundary_position}" \
     --gpu_cache \
-    --eval_metric MSE \
+    --eval_metric MSE MAE \
     --csv_output_folder "${OUTPUT_FOLDER_NAME}" \
     --gen_result_folder "${OUTPUT_FOLDER_NAME}/preds" \
     --gpus "${CUDA_VISIBLE_DEVICES_VALUE}" \
     "${extra_args[@]}" \
-    2>&1 | tee "${LOG_FILE}"
+    # 2>&1 | tee "${LOG_FILE}"

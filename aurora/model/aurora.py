@@ -410,13 +410,6 @@ class Aurora(torch.nn.Module):
 
     def _post_decoder_hook(self, batch: Batch, pred: Batch) -> Batch:
         return pred
-        # Use [:, -1:] to slice only the most recent timestep from the input history
-        pred = dataclasses.replace(
-            pred,
-            surf_vars={k: pred.surf_vars[k] + batch.surf_vars[k][:, -1:] for k in pred.surf_vars},
-            atmos_vars={k: pred.atmos_vars[k] + batch.atmos_vars[k][:, -1:] for k in pred.atmos_vars},
-        )
-        return pred
 
     def load_checkpoint(
         self,

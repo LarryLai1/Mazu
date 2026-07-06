@@ -883,8 +883,15 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
         base_time: pd.Timestamp,
         target_time: pd.Timestamp,
     ) -> dict:
-        source = self.get_boundary_source(base_time)
-        return self.get_boundary_at_time_from_source(source, base_time, target_time)
+        base_time = pd.Timestamp(base_time)
+        target_time = pd.Timestamp(target_time)
+        if target_time < base_time:
+            effective_base_time = base_time - pd.Timedelta(hours = self.forecast_cycle_hours)
+        else:
+            effective_base_time = base_time
+        source = self.get_boundary_source(effective_base_time)
+        return self.get_boundary_at_time_from_source(source, effective_base_time, target_time)
+
 
     def __getitem__(self, index: int) -> dict:
         date_hour = self.time_axis[index]

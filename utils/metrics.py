@@ -57,30 +57,42 @@ AuroraMSELoss = partial(AuroraLoss, loss_function_type = "MSE")
 class MSEAggregator:
     error_sum: float = 0.0
     count: int = 0
+    total_count: int = None
 
     def update(self, error_value_tensor: torch.Tensor):
         error_value_tensor = error_value_tensor.detach()
-        self.error_sum += error_value_tensor.sum().item()
+        if self.total_count is not None and self.total_count > 0:
+            self.error_sum += error_value_tensor.sum().item() / self.total_count
+        else:
+            self.error_sum += error_value_tensor.sum().item()
         self.count += error_value_tensor.numel()
 
     def mean(self):
         if self.count == 0:
             return float("NaN")
+        if self.total_count is not None and self.total_count > 0:
+            return self.error_sum
         return self.error_sum / self.count
 
 @dataclass
 class MAEAggregator:
     error_sum: float = 0.0
     count: int = 0
+    total_count: int = None
 
     def update(self, error_value_tensor: torch.Tensor):
         error_value_tensor = error_value_tensor.detach()
-        self.error_sum += error_value_tensor.sum().item()
+        if self.total_count is not None and self.total_count > 0:
+            self.error_sum += error_value_tensor.sum().item() / self.total_count
+        else:
+            self.error_sum += error_value_tensor.sum().item()
         self.count += error_value_tensor.numel()
 
     def mean(self):
         if self.count == 0:
             return float("NaN")
+        if self.total_count is not None and self.total_count > 0:
+            return self.error_sum
         return self.error_sum / self.count
 
 def prepare_each_lead_time_agg(
@@ -90,6 +102,7 @@ def prepare_each_lead_time_agg(
     upper_variables: list,
     levels: list,
     err_type: str,
+    total_count: int = None,
 ) -> dict:
     agg = {}
     var_name_mapping = {
@@ -114,6 +127,7 @@ def prepare_each_lead_time_agg(
             agg[t]['surf_vars'][_var] = aggregator(
                 error_sum = 0.0,
                 count = 0,
+                total_count = total_count,
             )
         for var in upper_variables:
             _var = var_name_mapping[var] if var in var_name_mapping else var
@@ -122,5 +136,6 @@ def prepare_each_lead_time_agg(
                 agg[t]['atmos_vars'][_var][lev] = aggregator(
                     error_sum = 0.0,
                     count = 0,
+                    total_count = total_count,
                 )
     return agg
