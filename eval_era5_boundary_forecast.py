@@ -192,7 +192,7 @@ def evaluate(
                 
             if gt_dict is None:
                 continue
-
+ 
             # Boundary forecast prediction
             try:
                 pred_dict = ds_bd.get_boundary_at_time_from_source(source, base_time, target_time)
@@ -201,7 +201,7 @@ def evaluate(
                 
             if pred_dict is None:
                 continue
-
+ 
             # Surface Variables
             for var in args.surface_variables:
                 mapped_var = ds_bd.map_var_name_for_Aurora(var)
@@ -218,7 +218,7 @@ def evaluate(
                         error_value_tensor = torch.abs(pred_tensor.float() - gt_tensor.float())
                     loss_mean = error_value_tensor.mean().unsqueeze(0)
                     err_agg[lt]["surf_vars"][mapped_var].update(loss_mean)
-
+ 
             # Upper Variables
             for var in args.upper_variables:
                 # Note: upper variables are not mapped in atmos_vars keys

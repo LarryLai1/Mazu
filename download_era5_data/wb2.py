@@ -25,9 +25,9 @@ needed_vars = sorted(rename_map.keys())
 
 lat = slice(2.5, 41.25)
 lon = slice(97.5, 147.25)
-time = slice("2020-07-01T00:00:00.000000000", "2020-12-31T23:00:00.000000000")
+time = slice("2020-08-01T00:00:00.000000000", "2020-09-01T00:00:00.000000000")
 # time = slice("2017-01-01T00:00:00.000000000", "2017-12-31T23:00:00.000000000")
-pred_time = slice(0, 132)
+pred_time = slice(0, 78)
 levels = [1000, 925, 850, 700, 500, 300, 150, 50]
 
 fs = gcsfs.GCSFileSystem(token='anon')
@@ -46,7 +46,7 @@ if missing_vars:
     print("Missing forecast vars:", missing_vars)
 ds = ds[existing_vars]
 
-out_root = Path("/tmp3/b12902101/era5_tw_forecast_5d")
+out_root = Path("/tmp3/b12902101/era5_tw_forecast_3d")
 out_root.mkdir(parents=True, exist_ok=True)
 
 def split_and_save_by_date(ds, out_root, time_values=None, limit=None):

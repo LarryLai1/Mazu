@@ -641,11 +641,18 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
 
             time_values = np.atleast_1d(pd.to_datetime(upper_nc.time.values)) if "time" in upper_nc.coords else np.array([pd.Timestamp(date_hour)], dtype = "datetime64[ns]")
 
+            raw_lat = torch.as_tensor(upper_nc.latitude.sel(latitude = latitude_slice).values)
+            raw_lon = torch.as_tensor(upper_nc.longitude.sel(longitude = longitude_slice).values)
+            flip_lat = (raw_lat[1] > raw_lat[0]).item() if raw_lat.numel() > 1 else False
+
+            if flip_lat:
+                raw_lat = torch.flip(raw_lat, dims=(0,))
+
             source = {
                 "time_values": pd.DatetimeIndex(pd.to_datetime(time_values)),
                 "prediction_timedelta_hours": prediction_timedelta_hours,
-                "latitude": torch.as_tensor(upper_nc.latitude.sel(latitude = latitude_slice).values),
-                "longitude": torch.as_tensor(upper_nc.longitude.sel(longitude = longitude_slice).values),
+                "latitude": raw_lat,
+                "longitude": raw_lon,
                 "levels": tuple(upper_nc[level_dim].sel({level_dim: self.levels}).values),
                 "surf_vars": {},
                 "atmos_vars": {},
@@ -675,8 +682,11 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
                 )
                 if "time" in data_array.dims:
                     data_array = data_array.sel(time = date_hour)
+                val_tensor = torch.as_tensor(data_array.values)
+                if flip_lat:
+                    val_tensor = torch.flip(val_tensor, dims=(-2,))
                 # store under the Aurora-mapped name for downstream consistency
-                source["surf_vars"][mapped_name] = torch.as_tensor(data_array.values)
+                source["surf_vars"][mapped_name] = val_tensor
 
             for upper_var in self.upper_variables:
                 data_array = upper_nc[upper_var].sel(
@@ -687,7 +697,10 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
                     data_array = data_array.sel(time = date_hour)
                 if level_dim in data_array.dims:
                     data_array = data_array.sel({level_dim: self.levels})
-                source["atmos_vars"][upper_var] = torch.as_tensor(data_array.values)
+                val_tensor = torch.as_tensor(data_array.values)
+                if flip_lat:
+                    val_tensor = torch.flip(val_tensor, dims=(-2,))
+                source["atmos_vars"][upper_var] = val_tensor
 
         return source
 

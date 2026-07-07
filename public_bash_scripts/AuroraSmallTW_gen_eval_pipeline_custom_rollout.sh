@@ -82,8 +82,8 @@ start_time="2020-03-01 00:00:00"
 if [[ "${pred}" == "true" ]]; then
     # end_time="2020-04-01 00:00:00"
     end_time="2020-03-02 00:00:00"
-    extra_args=("--save_rollout_step" 72)
-    # extra_args=("--save_rollout_step" $(seq 1 24) 36 48 60 72)
+    # extra_args=("--save_rollout_step" 72)
+    extra_args=("--save_rollout_step" $(seq 1 24) 36 48 60 72)
     output_root="/tmp3/b12902101/LAM_output_preds"
 else
     end_time="2020-04-01 00:00:00"

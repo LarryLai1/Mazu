@@ -1073,6 +1073,7 @@ def evaluate(
                             ),
                         )
                         _pred = model_forward_with_latent_boundary(model, rollout_batch, boundary_batch, args)
+                        prefetched_boundary[step_index] = None
                     else:
                         _pred = model(rollout_batch)
 
@@ -1097,9 +1098,10 @@ def evaluate(
                     )
 
                     # Determine slice width for error calculation
-                    slice_width = args.boundary_width
-                    if boundary_enabled and args.boundary_smooth_mode != "no":
-                        slice_width = args.boundary_width + args.boundary_smooth_width_adjustment
+                    # slice_width = args.boundary_width
+                    # if boundary_enabled and args.boundary_smooth_mode != "no":
+                    #     slice_width = args.boundary_width + args.boundary_smooth_width_adjustment
+                    slice_width = 8
 
                     # 2. Calculate Loss immediately
                     if boundary_enabled and slice_width > 0:
@@ -1188,6 +1190,20 @@ def evaluate(
 
             if boundary_enabled:
                 gpu_boundary_cache.clear()
+
+            # Free CPU and GPU memory at the end of the batch
+            inputs = None
+            labels = None
+            dates = None
+            _label_list = None
+            _input = None
+            rollout_batch = None
+            if prefetched_boundary is not None:
+                prefetched_boundary.clear()
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
 def export_agg_to_csv(
         args,

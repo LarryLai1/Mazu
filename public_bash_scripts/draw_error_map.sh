@@ -1,6 +1,11 @@
-python plot_residual.py --var_name msl --output_dir residual_plots_t-1/residual_plots_baseline \
-    --preds_dir "/tmp3/b12902101/LAM_output_preds/era5_boundary0_inject-inside_no_exact_encoder/preds" \
-    --plot_mode prediction --init_time "2020-07-10 01:00:00"
+for plot_mode in "prediction" "residual"; do
+    python plot_residual.py --var_name msl --output_dir residual_plots_t-1/residual_plots_era5 \
+        --preds_dir "/tmp3/b12902101/era5_tw_forecast_3d" \
+        --plot_mode "${plot_mode}" --init_time "2020-03-01 00:00:00"
+    python plot_residual.py --var_name msl --output_dir residual_plots_t-1/residual_plots_baseline \
+        --preds_dir "/tmp3/b12902101/LAM_output_preds/era5_boundary0_inject-inside_no_exact_encoder/preds" \
+        --plot_mode "${plot_mode}" --init_time "2020-03-01 01:00:00"
+done
 
 
 for interp in "nearest"; do
@@ -10,7 +15,7 @@ for interp in "nearest"; do
             for bd_position in "backbone"; do
                 python plot_residual.py --var_name msl --output_dir residual_plots_t-1/residual_plots_8_${smooth}_${interp}_${bd_position} \
                     --preds_dir "/tmp3/b12902101/LAM_output_preds/era5_boundary8_inject-inside_${smooth}_${interp}_${bd_position}/preds/" \
-                    --plot_mode "${plot_mode}" --init_time "2020-07-10 01:00:00"
+                    --plot_mode "${plot_mode}" --init_time "2020-03-01 01:00:00"
             done
         done
     done
