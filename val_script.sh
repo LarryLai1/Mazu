@@ -36,10 +36,10 @@ for interp in "nearest"; do
     done
 done
 
-"${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width 0 --boundary_mode "inject-inside" \
-        --boundary_pooling no --boundary_smooth_mode "no" \
-        --boundary_time_interp_mode exact \
-        --pred "true"
+# "${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width 0 --boundary_mode "inject-inside" \
+#         --boundary_pooling no --boundary_smooth_mode "no" \
+#         --boundary_time_interp_mode exact \
+#         --pred "true"
 
 TOTAL_TIME=$((SECONDS))
 echo "All jobs completed in ${TOTAL_TIME}s."
