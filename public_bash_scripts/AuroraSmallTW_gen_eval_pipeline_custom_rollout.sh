@@ -78,6 +78,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 
 MODEL_CKPT_PATH="/tmp2/yuanlim0919/lateral_smooth/model_weights/Aurora/model.safetensors"
 
+batch_size=8
 start_time="2020-03-01 00:00:00"
 if [[ "${pred}" == "true" ]]; then
     # end_time="2020-04-01 00:00:00"
@@ -86,6 +87,9 @@ if [[ "${pred}" == "true" ]]; then
     extra_args=("--save_rollout_step" $(seq 1 24) $(seq 24 6 72))
     # extra_args=("--save_rollout_step" $(seq 1 24) 36 48 60 72)
     output_root="/tmp3/b12902101/LAM_output_preds"
+    # batch_size=1
+    # CUDA_VISIBLE_DEVICES_VALUE=${CUDA_VISIBLE_DEVICES_VALUE:0:1}
+    # export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 else
     end_time="2020-04-01 00:00:00"
     extra_args=()
@@ -122,7 +126,7 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --data_root_dir /work/yunye0121/era5_tw \
     --boundary_root_dir "${boundary_root_dir}" \
     --checkpoint_path "${MODEL_CKPT_PATH}" \
-    --batch_size 8 \
+    --batch_size ${batch_size} \
     --num_workers 1 \
     --seed 1126 \
     --start_date_hour "${start_time}" \
@@ -135,7 +139,7 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --longitude 100 144.75 \
     --lead_time 1 \
     --input_time_window 2 \
-    --rollout_step 72 \
+    --rollout_step 240 \
     --timestep_hours 1 \
     --boundary_width ${boundary_width} \
     --boundary_mode ${boundary_mode} \
@@ -149,5 +153,6 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --csv_output_folder "${OUTPUT_FOLDER_NAME}" \
     --gen_result_folder "${OUTPUT_FOLDER_NAME}/preds" \
     --gpus "${CUDA_VISIBLE_DEVICES_VALUE}" \
+    --lazy_mode \
     "${extra_args[@]}" \
     # 2>&1 | tee "${LOG_FILE}"

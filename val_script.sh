@@ -18,7 +18,8 @@ RUN_SCRIPT="${SCRIPT_DIR}/public_bash_scripts/AuroraSmallTW_gen_eval_pipeline_cu
 BOUNDARY_MODE="inject-inside"
 
 GPU="0,1,2,3"
-# GPU="2,3,4,5"
+# GPU="4,5,6,7"
+# GPU="0"
 
 for interp in "nearest"; do
     for smooth in "no"; do

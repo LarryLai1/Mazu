@@ -21,6 +21,7 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
         rollout_step: int = 1,
         get_datetime: bool = True,
         sample_stride_hours: int = 1,
+        lazy: bool = False,
     ) -> None:
         super().__init__()
         self.data_root_dir = data_root_dir
@@ -37,6 +38,7 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
         self.longitude = longitude
         self.get_datetime = get_datetime
         self.sample_stride_hours = sample_stride_hours
+        self.lazy = lazy
 
     def map_var_name_for_Aurora(self, var_name: str) -> str:
         var_name_mapping = {
@@ -141,11 +143,6 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
             self.start_date_hour + pd.Timedelta(hours = index * self.sample_stride_hours + i * self.lead_time) \
             for i in range(self.input_time_window)
         ]
-        date_hour_outputs = [
-            # date_hour_inputs[-1] + pd.Timedelta(hours = self.lead_time + i) \
-            date_hour_inputs[-1] + pd.Timedelta(hours = self.lead_time * (i + 1)) \
-            for i in range(self.rollout_step)
-        ]
 
         in_t_list = []
         for in_t in date_hour_inputs:
@@ -156,6 +153,20 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
                 sfc_nc_in.load()
                 in_t_list.append(self._nc_to_dict(upper_nc_in, sfc_nc_in))
         input_data = self.concat_ts(in_t_list)
+
+        # In lazy mode, targets are loaded on demand via load_single_target()
+        # during the rollout loop instead of being preloaded here.
+        if self.lazy:
+            result = [input_data]
+            if self.get_datetime:
+                result.append(date_hour_inputs[-1].strftime("%Y-%m-%d %H:%M:%S"))
+            return tuple(result)
+
+        date_hour_outputs = [
+            # date_hour_inputs[-1] + pd.Timedelta(hours = self.lead_time + i) \
+            date_hour_inputs[-1] + pd.Timedelta(hours = self.lead_time * (i + 1)) \
+            for i in range(self.rollout_step)
+        ]
 
         out_t_list = []
         for out_t in date_hour_outputs:
@@ -171,6 +182,48 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
         if self.get_datetime:
             result.append(date_hour_inputs[-1].strftime("%Y-%m-%d %H:%M:%S"))
         return tuple(result)
+
+    def load_single_target(self, base_datetime_strs, rollout_step_index: int) -> dict:
+        """
+        Lazily load ONE target timestep for a given rollout step, for each sample in the batch.
+
+        Args:
+            base_datetime_strs: A single datetime string or a list/tuple of datetime strings
+                                (one per sample in the batch), representing the last input timestep.
+            rollout_step_index: 1-based rollout step (1, 2, 3, ...).
+
+        Returns:
+            dict with 'surf_vars' and 'atmos_vars', each value has shape [B, 1, H, W]
+            for surface vars or [B, 1, L, H, W] for atmos vars.
+        """
+        if isinstance(base_datetime_strs, str):
+            base_datetime_strs = [base_datetime_strs]
+
+        batch_targets = []
+        for dt_str in base_datetime_strs:
+            base_time = pd.Timestamp(dt_str)
+            target_time = base_time + pd.Timedelta(hours = self.lead_time * rollout_step_index)
+
+            upper_path, sfc_path = self._dt_to_path(target_time)
+            with xr.open_dataset(upper_path) as upper_nc, \
+                xr.open_dataset(sfc_path) as sfc_nc:
+                upper_nc.load()
+                sfc_nc.load()
+                batch_targets.append(self._nc_to_dict(upper_nc, sfc_nc))
+
+        # Stack along batch dim and add time dim (size 1): [B, 1, ...]
+        target_data = {
+            "surf_vars": {
+                var: torch.stack([b["surf_vars"][var] for b in batch_targets], dim = 0).unsqueeze(1)
+                for var in batch_targets[0]["surf_vars"]
+            },
+            "atmos_vars": {
+                var: torch.stack([b["atmos_vars"][var] for b in batch_targets], dim = 0).unsqueeze(1)
+                for var in batch_targets[0]["atmos_vars"]
+            },
+        }
+
+        return target_data
 
     def check_last_timestep(self):
         """

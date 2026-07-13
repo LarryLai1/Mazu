@@ -111,6 +111,11 @@ def parse_args():
     parser.add_argument("--use_pretrained_weight", action = "store_true")
     # parser.add_argument('--checkpoint_path', type = str, required = True)
     parser.add_argument('--checkpoint_path', type = str, default = None)
+    parser.add_argument(
+        '--lazy_mode',
+        action = 'store_true',
+        help = 'Stream rollout targets to GPU one step at a time instead of moving the whole batch of targets to GPU upfront. Reduces peak GPU/CPU memory usage for long rollouts.',
+    )
     parser.add_argument('--batch_size', type = int, default = 16)
     parser.add_argument('--num_workers', type = int, default = 4)
     parser.add_argument('--seed', type = int, default = 42)
@@ -253,7 +258,7 @@ def create_model(args, device):
     return model
 
 def create_dataset(args):
-    logger.info("Creating Aurora dataset...")
+    logger.info("Creating Aurora dataset%s...", " (lazy target loading)" if args.lazy_mode else "")
     # Calculate the actual end_date_hour needed to load targets during rollout
     start_dt = pd.Timestamp(args.start_date_hour)
     end_dt = pd.Timestamp(args.end_date_hour)
@@ -274,6 +279,7 @@ def create_dataset(args):
         input_time_window = args.input_time_window,
         rollout_step = args.rollout_step,
         sample_stride_hours=args.timestep_hours,  # Align dataset sampling with model rollout timestep
+        lazy = args.lazy_mode,
     )
     return ds
 
@@ -891,21 +897,29 @@ def evaluate(
         # for batch in dataloader:
             # if (rank == 0):
             #     print("----------------------------------------")
-            inputs, labels, dates = batch
-            
+            if args.lazy_mode:
+                # --- Lazy version: batch is (inputs, dates), no pre-loaded labels ---
+                inputs, dates = batch
+                labels = None
+            else:
+                inputs, labels, dates = batch
+
             # --- Data moving to device ---
             for _k_var_type in inputs:
                 for _k_var in inputs[_k_var_type]:
                     inputs[_k_var_type][_k_var] = inputs[_k_var_type][_k_var].to(device)
-            for _k_var_type in labels:
-                for _k_var in labels[_k_var_type]:
-                    labels[_k_var_type][_k_var] = labels[_k_var_type][_k_var].to(device)
+            if not args.lazy_mode:
+                for _k_var_type in labels:
+                    for _k_var in labels[_k_var_type]:
+                        labels[_k_var_type][_k_var] = labels[_k_var_type][_k_var].to(device)
             if isinstance(static_data["static_vars"], torch.Tensor):
                 static_data["static_vars"] = static_data["static_vars"].to(device)
 
-            # Pre-slice labels (this is okay to keep in list if it fits in memory, 
-            # usually labels are smaller than the computation graph)
-            _label_list = slice_timeaxis(labels)
+            _label_list = None
+            if not args.lazy_mode:
+                # Pre-slice labels (this is okay to keep in list if it fits in memory,
+                # usually labels are smaller than the computation graph)
+                _label_list = slice_timeaxis(labels)
 
             batch_times = tuple(map(lambda d: pd.Timestamp(d), dates))
             base_times = None
@@ -1078,7 +1092,20 @@ def evaluate(
                         _pred = model(rollout_batch)
 
                     # 1. Get the corresponding label for this specific step
-                    _label_data = _label_list[step_index]
+                    if args.lazy_mode:
+                        # --- LAZY TARGET LOADING ---
+                        # Load only this one target from disk and stream it to GPU,
+                        # instead of pre-loading/moving the whole rollout's targets upfront.
+                        _label_data = ds_ref.load_single_target(
+                            base_datetime_strs = dates,
+                            rollout_step_index = t,
+                        )
+                        for _k_var in _label_data["surf_vars"]:
+                            _label_data["surf_vars"][_k_var] = _label_data["surf_vars"][_k_var].to(device)
+                        for _k_var in _label_data["atmos_vars"]:
+                            _label_data["atmos_vars"][_k_var] = _label_data["atmos_vars"][_k_var].to(device)
+                    else:
+                        _label_data = _label_list[step_index]
 
                     _label = Batch(
                         surf_vars = _label_data["surf_vars"],

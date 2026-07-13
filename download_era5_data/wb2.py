@@ -23,14 +23,17 @@ rename_map.update(_collect_vars("surface"))
 rename_map.update(_collect_vars("atmospheric"))
 needed_vars = sorted(rename_map.keys())
 
+# lat = slice(1, 42.25)
+# lon = slice(97, 148.5)
 lat = slice(2.5, 41.25)
 lon = slice(97.5, 147.25)
-time = slice("2020-08-01T00:00:00.000000000", "2020-09-01T00:00:00.000000000")
-# time = slice("2017-01-01T00:00:00.000000000", "2017-12-31T23:00:00.000000000")
-pred_time = slice(0, 78)
+time = slice("2020-01-01T00:00:00.000000000", "2020-12-31T00:00:00.000000000")
+# pred_time = slice(0, 78)
+pred_time = slice(0, 240)
 levels = [1000, 925, 850, 700, 500, 300, 150, 50]
 
 fs = gcsfs.GCSFileSystem(token='anon')
+# mapper = fs.get_mapper("gs://weatherbench2/datasets/hres/2016-2022-0012-240x121_equiangular_with_poles_conservative.zarr")
 mapper = fs.get_mapper("gs://weatherbench2/datasets/hres/2016-2022-0012-1440x721.zarr")
 ds = xr.open_zarr(mapper, consolidated=True, decode_timedelta=False)
 ds = ds.sel(
@@ -46,7 +49,8 @@ if missing_vars:
     print("Missing forecast vars:", missing_vars)
 ds = ds[existing_vars]
 
-out_root = Path("/tmp3/b12902101/era5_tw_forecast_3d")
+# out_root = Path("/tmp3/b12902101/era5_tw_forecast_1.5deg")
+out_root = Path("/tmp3/b12902101/era5_tw_forecast_0.25deg")
 out_root.mkdir(parents=True, exist_ok=True)
 
 def split_and_save_by_date(ds, out_root, time_values=None, limit=None):
