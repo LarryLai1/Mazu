@@ -8,6 +8,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 import torch.multiprocessing as mp
+from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 import random
 import numpy as np
@@ -58,6 +59,16 @@ def parse_args():
     parser.add_argument('--mp_world_size', type=int, default=None)
     parser.add_argument('--gpus', type=str, default=None,
                         help='Comma-separated list of GPU ids to use, e.g. "0,1,2". Spawns one process per GPU.')
+    parser.add_argument('--batch_size', type=int, default=8,
+                        help='Number of ground-truth timesteps loaded per DataLoader batch.')
+    parser.add_argument('--num_workers', type=int, default=1,
+                        help='DataLoader worker processes for parallel ground-truth NetCDF reads (0 = load in main process).')
+    parser.add_argument('--prefetch_factor', type=int, default=2,
+                        help='DataLoader prefetch_factor (only used when num_workers > 0).')
+    parser.add_argument('--dataloader_mp_context', type=str, default='forkserver',
+                        choices=['fork', 'spawn', 'forkserver'],
+                        help='Start method for DataLoader workers. Use spawn/forkserver (default) '
+                             'because CUDA/HDF5 are already initialized and are unsafe to fork.')
 
     return parser.parse_args()
 
@@ -75,7 +86,7 @@ def _resolve_mp_world_size(args):
         return max(1, torch.cuda.device_count())
     return 1
 
-def create_datasets(args):
+def create_datasets(args, verbose=True):
     prediction_timedelta_hours = args.prediction_timedelta_hours
     if prediction_timedelta_hours is None:
         try:
@@ -89,21 +100,18 @@ def create_datasets(args):
                 candidate_path = Path(args.boundary_root_dir) / f"{name}_upper.nc"
             
             if candidate_path.exists():
-                with xr.open_dataset(candidate_path) as ds:
+                with xr.open_dataset(candidate_path, decode_timedelta=True) as ds:
                     if "prediction_timedelta" in ds.coords or "prediction_timedelta" in ds.dims:
                         pt_vals = ds["prediction_timedelta"].values
                         if np.issubdtype(pt_vals.dtype, np.timedelta64):
                             prediction_timedelta_hours = sorted(list(set(int(x / np.timedelta64(1, "h")) for x in pt_vals)))
                         else:
                             prediction_timedelta_hours = sorted(list(set(int(x) for x in pt_vals)))
-                        prediction_timedelta_hours = [x for x in prediction_timedelta_hours if x <= 72]
+                        prediction_timedelta_hours = [x for x in prediction_timedelta_hours if x <= 240]
         except Exception as e:
             print(f"Failed to auto-detect prediction_timedelta: {e}")
-            
-    if prediction_timedelta_hours is None:
-        prediction_timedelta_hours = list(range(1, 25)) + [36, 48, 60, 72]
-        print(f"Using default prediction_timedelta_hours: {prediction_timedelta_hours}")
-    else:
+
+    if verbose:
         print(f"Using prediction_timedelta_hours: {prediction_timedelta_hours}")
 
     ds_bd = BoundaryConditionDataset_ERA5(
@@ -164,6 +172,35 @@ def _build_metric_lists(args, prediction_timedelta_hours):
         err_agg_list.append(agg)
     return err_agg_list
 
+class _GroundTruthTaskDataset(Dataset):
+    """Map-style dataset over (base_time, lead_time) pairs that loads the ground-truth
+    NetCDF files. Wrapping this in a DataLoader lets `num_workers` processes read the
+    files in parallel, which is the actual bottleneck of the evaluation."""
+
+    def __init__(self, ds_gt, tasks):
+        self.ds_gt = ds_gt
+        self.tasks = tasks  # list of (base_time, lt, target_time)
+
+    def __len__(self):
+        return len(self.tasks)
+
+    def __getitem__(self, idx):
+        base_time, lt, target_time = self.tasks[idx]
+        try:
+            upper_path, sfc_path = self.ds_gt._dt_to_path(target_time)
+            with xr.open_dataset(upper_path) as upper_nc_gt, xr.open_dataset(sfc_path) as sfc_nc_gt:
+                gt_dict = self.ds_gt._nc_to_dict(upper_nc_gt, sfc_nc_gt)
+        except Exception:
+            gt_dict = None
+        return {"base_time": base_time, "lt": lt, "target_time": target_time, "gt_dict": gt_dict}
+
+
+def _identity_collate(batch):
+    # Keep the list of per-sample dicts as-is; tensors have per-variable shapes so the
+    # default collate (which stacks) is not appropriate here.
+    return batch
+
+
 def evaluate(
     args,
     ds_bd,
@@ -173,44 +210,73 @@ def evaluate(
     err_agg_list,
     device,
 ):
-    for base_time in tqdm(time_axis, desc="Evaluating Era5 Boundary Forecast"):
-        try:
-            source = ds_bd.get_boundary_source(base_time)
-        except Exception:
-            continue
-            
+    # Enumerate all (base_time, lead_time) tasks in order so the DataLoader streams
+    # ground truth base_time-major; the boundary source is then loaded once per base_time.
+    tasks = []
+    for base_time in time_axis:
         for lt in prediction_timedelta_hours:
-            target_time = base_time + pd.Timedelta(hours=lt)
-            
-            # Ground truth
-            try:
-                upper_path, sfc_path = ds_gt._dt_to_path(target_time)
-                with xr.open_dataset(upper_path) as upper_nc_gt, xr.open_dataset(sfc_path) as sfc_nc_gt:
-                    gt_dict = ds_gt._nc_to_dict(upper_nc_gt, sfc_nc_gt)
-            except Exception:
-                continue
-                
+            tasks.append((base_time, lt, base_time + pd.Timedelta(hours=lt)))
+
+    gt_dataset = _GroundTruthTaskDataset(ds_gt, tasks)
+    loader_kwargs = dict(
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        shuffle=False,
+        collate_fn=_identity_collate,
+        pin_memory=False,
+    )
+    if args.num_workers > 0:
+        loader_kwargs["prefetch_factor"] = args.prefetch_factor
+        loader_kwargs["persistent_workers"] = True
+        # This process has already initialized CUDA and HDF5 (via create_datasets), and
+        # both are unsafe to fork. Start workers with spawn/forkserver so they begin from
+        # a clean process instead of segfaulting.
+        loader_kwargs["multiprocessing_context"] = mp.get_context(args.dataloader_mp_context)
+    loader = DataLoader(gt_dataset, **loader_kwargs)
+
+    # Boundary source is keyed by base_time and expensive to load; cache the most recent
+    # one since tasks are streamed in base_time-major order.
+    cur_base_time = None
+    source = None
+
+    for batch in tqdm(loader, desc="Evaluating Era5 Boundary Forecast"):
+        for item in batch:
+            base_time = item["base_time"]
+            lt = item["lt"]
+            target_time = item["target_time"]
+            gt_dict = item["gt_dict"]
+
             if gt_dict is None:
                 continue
- 
+
+            # (Re)load the boundary source when the base_time advances.
+            if base_time != cur_base_time:
+                cur_base_time = base_time
+                try:
+                    source = ds_bd.get_boundary_source(base_time)
+                except Exception:
+                    source = None
+            if source is None:
+                continue
+
             # Boundary forecast prediction
             try:
                 pred_dict = ds_bd.get_boundary_at_time_from_source(source, base_time, target_time)
             except Exception:
                 continue
-                
+
             if pred_dict is None:
                 continue
- 
+
             # Surface Variables
             for var in args.surface_variables:
                 mapped_var = ds_bd.map_var_name_for_Aurora(var)
                 pred_tensor = pred_dict["surf_vars"][mapped_var].to(device)
                 gt_tensor = gt_dict["surf_vars"][mapped_var].to(device)
-                
+
                 if pred_tensor.shape != gt_tensor.shape:
                     continue
-                
+
                 for metric, err_agg in zip(args.eval_metric, err_agg_list):
                     if metric == "MSE":
                         error_value_tensor = (pred_tensor.float() - gt_tensor.float()) ** 2
@@ -218,20 +284,20 @@ def evaluate(
                         error_value_tensor = torch.abs(pred_tensor.float() - gt_tensor.float())
                     loss_mean = error_value_tensor.mean().unsqueeze(0)
                     err_agg[lt]["surf_vars"][mapped_var].update(loss_mean)
- 
+
             # Upper Variables
             for var in args.upper_variables:
                 # Note: upper variables are not mapped in atmos_vars keys
                 pred_tensor_all_levels = pred_dict["atmos_vars"][var].to(device)
                 gt_tensor_all_levels = gt_dict["atmos_vars"][var].to(device)
-                
+
                 for i, lev in enumerate(args.levels):
                     pred_tensor = pred_tensor_all_levels[i]
                     gt_tensor = gt_tensor_all_levels[i]
-                    
+
                     if pred_tensor.shape != gt_tensor.shape:
                         continue
-                        
+
                     for metric, err_agg in zip(args.eval_metric, err_agg_list):
                         if metric == "MSE":
                             error_value_tensor = (pred_tensor.float() - gt_tensor.float()) ** 2
@@ -316,8 +382,8 @@ def _mp_worker_entry(rank, world_size, args, prediction_timedelta_hours):
     else:
         device = torch.device("cpu")
 
-    ds_bd, ds_gt, _ = create_datasets(args)
-    
+    ds_bd, ds_gt, _ = create_datasets(args, verbose=(rank == 0))
+
     full_time_axis = pd.date_range(
         start=args.start_date_hour,
         end=args.end_date_hour,
@@ -366,7 +432,7 @@ def main():
     Path(args.csv_output_folder).mkdir(parents=True, exist_ok=True)
     
     # Pre-detect prediction timedelta using single dummy datasets instantiation
-    _, _, prediction_timedelta_hours = create_datasets(args)
+    _, _, prediction_timedelta_hours = create_datasets(args, verbose=False)
 
     if world_size <= 1:
         set_seed(args.seed)

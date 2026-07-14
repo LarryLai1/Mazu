@@ -1,8 +1,18 @@
 from logging import info
 from pathlib import Path
+import threading
 import pandas as pd
 import torch
 import xarray as xr
+
+# Process-wide lock serialising netCDF/HDF5 file access.
+# The netCDF4/HDF5 C library is typically NOT built thread-safe, so concurrent
+# reads/writes from different threads within one process corrupt the library and
+# raise "NetCDF: HDF error". In lazy mode the background prefetch thread reads
+# target files while the main thread may read boundary files or write prediction
+# outputs; every such access must hold this lock. (DataLoader worker *processes*
+# have independent HDF5 state and do not need it.)
+NETCDF_IO_LOCK = threading.Lock()
 
 class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
     def __init__(
@@ -205,11 +215,14 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
             target_time = base_time + pd.Timedelta(hours = self.lead_time * rollout_step_index)
 
             upper_path, sfc_path = self._dt_to_path(target_time)
-            with xr.open_dataset(upper_path) as upper_nc, \
-                xr.open_dataset(sfc_path) as sfc_nc:
-                upper_nc.load()
-                sfc_nc.load()
-                batch_targets.append(self._nc_to_dict(upper_nc, sfc_nc))
+            # Runs on the lazy prefetch worker thread: serialise HDF5 access against
+            # any concurrent main-thread netCDF read/write (see NETCDF_IO_LOCK).
+            with NETCDF_IO_LOCK:
+                with xr.open_dataset(upper_path) as upper_nc, \
+                    xr.open_dataset(sfc_path) as sfc_nc:
+                    upper_nc.load()
+                    sfc_nc.load()
+                    batch_targets.append(self._nc_to_dict(upper_nc, sfc_nc))
 
         # Stack along batch dim and add time dim (size 1): [B, 1, ...]
         target_data = {

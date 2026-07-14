@@ -9,17 +9,21 @@ legend_names=("Baseline")
 # csv_paths=()
 # styles=()
 # legend_names=()
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 
 # if doesn't exist era5_boundary_data MAE csv, run eval_era5_boundary_forecast.py
 if [ ! -f "${root_dir}/era5_boundary_data/MAE.csv" ]; then
     python eval_era5_boundary_forecast.py \
-        --boundary_root_dir "/tmp3/b12902101/era5_tw_forecast_3d" \
+        --boundary_root_dir "/tmp3/b12902101/era5_tw_forecast_0.25deg" \
         --data_root_dir "/tmp3/yunye0121/era5_tw" \
-        --start_date_hour "2020-03-01 00:00:00" \
-        --end_date_hour "2020-04-01 00:00:00" \
+        --start_date_hour "2020-01-02 00:00:00" \
+        --end_date_hour "2020-12-21 00:00:00" \
+        --batch_size 8 \
+        --num_workers 1 \
         --csv_output_folder ${root_dir}/era5_boundary_data \
         --eval_metric "MAE" \
-        --gpus 7
+        --gpus "0"
 fi
 
 csv_paths+=("${root_dir}/era5_boundary_data/${suffix}")

@@ -1,7 +1,7 @@
 for plot_mode in "prediction" "residual"; do
     python plot_residual.py --var_name msl --output_dir residual_plots_t-1/residual_plots_era5 \
-        --preds_dir "/tmp3/b12902101/era5_tw_forecast_3d" \
-        --plot_mode "${plot_mode}" --init_time "2020-03-01 00:00:00"
+        --preds_dir "/tmp3/b12902101/era5_tw_forecast_0.25deg" \
+        --plot_mode "${plot_mode}" --init_time "2020-03-01 01:00:00"
     python plot_residual.py --var_name msl --output_dir residual_plots_t-1/residual_plots_baseline \
         --preds_dir "/tmp3/b12902101/LAM_output_preds/era5_boundary0_inject-inside_no_exact_encoder/preds" \
         --plot_mode "${plot_mode}" --init_time "2020-03-01 01:00:00"

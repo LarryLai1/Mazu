@@ -62,6 +62,12 @@ def parse_args():
             "Supported keys are whatever plt.plot accepts (marker, linestyle, linewidth, markersize, alpha, etc.)."
         ),
     )
+    p.add_argument(
+        "--max_hours",
+        type=int,
+        default=None,
+        help="Only plot forecast hours up to this value (inclusive). Default: plot all hours.",
+    )
     p.add_argument("--output_dir", default="err_plots", help="Directory to save images.")
     p.add_argument("--ext", default="png", choices=["png", "jpg", "jpeg", "pdf", "svg"], help="Image format.")
     p.add_argument("--dpi", type=int, default=300, help="Image DPI.")
@@ -219,6 +225,15 @@ def main():
 
     for p in csv_paths:
         df, var_col, time_cols_sorted, hours = read_csv_with_time_cols(p)
+        if args.max_hours is not None:
+            kept = [(c, h) for c, h in zip(time_cols_sorted, hours) if h <= args.max_hours]
+            if not kept:
+                raise ValueError(
+                    f"{p}: no forecast hours <= --max_hours={args.max_hours} "
+                    f"(available hours: {hours})."
+                )
+            time_cols_sorted = [c for c, _ in kept]
+            hours = [h for _, h in kept]
         frames.append(df)
         var_cols.append(var_col)
         time_cols_by_file[p] = time_cols_sorted

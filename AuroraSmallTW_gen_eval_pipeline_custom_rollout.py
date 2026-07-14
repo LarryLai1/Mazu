@@ -20,7 +20,7 @@ from aurora import Batch, Metadata
 # from aurora import rollout
 # from utils.custom_rollout import rollout_with_gpu
 from aurora.model.aurora import AuroraSmall
-from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora
+from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora, NETCDF_IO_LOCK
 from datasets.BoundaryConditionDataset import BoundaryConditionDataset_Aurora, BoundaryConditionDataset_ERA5, BoundaryConditionDataset_GroundTruth
 from utils.metrics import AuroraMAELoss, AuroraMSELoss
 from utils.metrics import prepare_each_lead_time_agg
@@ -109,12 +109,20 @@ def parse_args():
         help = "Enable GPU boundary cache and preload boundary files into memory.",
     )
     parser.add_argument("--use_pretrained_weight", action = "store_true")
-    # parser.add_argument('--checkpoint_path', type = str, required = True)
     parser.add_argument('--checkpoint_path', type = str, default = None)
     parser.add_argument(
         '--lazy_mode',
         action = 'store_true',
         help = 'Stream rollout targets to GPU one step at a time instead of moving the whole batch of targets to GPU upfront. Reduces peak GPU/CPU memory usage for long rollouts.',
+    )
+    parser.add_argument(
+        '--lazy_prefetch_steps',
+        type = int,
+        default = 2,
+        help = 'Lazy mode only: window size (n) of GPU-resident rollout targets. At step t the '
+               'target for step t+n-1 is read on a background thread and staged onto the GPU via a '
+               'dedicated copy stream, so targets t..t+n-1 are already on the GPU when needed and '
+               'H2D transfers overlap with compute. n=1 disables look-ahead (stage target t at step t).',
     )
     parser.add_argument('--batch_size', type = int, default = 16)
     parser.add_argument('--num_workers', type = int, default = 4)
@@ -141,6 +149,15 @@ def parse_args():
     parser.add_argument("--eval_metric", type = str, nargs = "+", default = ["MSE"], choices = ["MSE", "MAE"])
 
     parser.add_argument("--csv_output_folder", type = str, default = "./errs")
+    parser.add_argument(
+        '--resume_inference',
+        action = 'store_true',
+        help = 'Resume from the inference-progress checkpoint (if present) written by a previous '
+               'run, restoring accumulated errors and skipping already-completed batches. '
+               'Inference-progress checkpoints are ALWAYS written regardless of this flag; this '
+               'option only controls whether an existing one is loaded. Note: this is unrelated '
+               'to --checkpoint_path, which loads model weights.',
+    )
     parser.add_argument('--mixed_precision', type = str, default = None, choices = ["no", "fp16", "bf16"])
     parser.add_argument('--mp_world_size', type = int, default = 1)
     parser.add_argument(
@@ -226,6 +243,94 @@ def _merge_state_into_err_agg(err_agg, state):
                 li = int(lev)
                 err_agg[ti]["atmos_vars"][var][li].error_sum += float(s["error_sum"])
                 err_agg[ti]["atmos_vars"][var][li].count += int(s["count"])
+
+# --- Inference-progress checkpointing -------------------------------------------------
+# This is unrelated to model-weight checkpoints (--checkpoint_path). It periodically
+# persists how far the rollout evaluation has progressed (per rank) so that a run killed
+# mid-inference (e.g. server failure) can be resumed instead of restarted from scratch.
+#
+# Each rank stores one JSON file holding:
+#   - a signature describing the run configuration (guards against resuming into an
+#     incompatible run, which would silently corrupt the aggregated metrics),
+#   - completed_batches: how many leading dataloader batches were fully processed,
+#   - metrics: the accumulated per-lead-time error state (same schema as the MP handoff).
+# The dataloader iterates deterministically (shuffle=False), so on resume we restore the
+# accumulated errors and simply skip the first `completed_batches` batches.
+
+def _inference_ckpt_path(args, rank):
+    root = Path(args.csv_output_folder) if args.csv_output_folder is not None else Path(args.gen_result_folder)
+    return root / ".inference_ckpt" / f"rank_{rank}.json"
+
+def _inference_ckpt_signature(args, rank, world_size, num_samples):
+    # Fields that, if changed, would make a restored accumulator or a batch-skip count
+    # meaningless (or wrong) for the new run.
+    return {
+        "rank": rank,
+        "world_size": world_size,
+        "num_samples": num_samples,
+        "batch_size": args.batch_size,
+        "eval_metric": list(args.eval_metric),
+        "rollout_step": args.rollout_step,
+        "lead_time": args.lead_time,
+        "input_time_window": args.input_time_window,
+        "start_date_hour": args.start_date_hour,
+        "end_date_hour": args.end_date_hour,
+    }
+
+def _save_inference_ckpt(args, rank, world_size, num_samples, completed_batches, err_agg_list):
+    path = _inference_ckpt_path(args, rank)
+    path.parent.mkdir(parents = True, exist_ok = True)
+    payload = {
+        "signature": _inference_ckpt_signature(args, rank, world_size, num_samples),
+        "completed_batches": int(completed_batches),
+        "metrics": {
+            metric: _err_agg_to_state(err_agg)
+            for metric, err_agg in zip(args.eval_metric, err_agg_list)
+        },
+    }
+    # Write to a temp file then atomically rename, so a crash mid-write can never leave a
+    # truncated/corrupt checkpoint behind: a reader always sees either the complete old
+    # file or the complete new one (rename(2) is atomic). fsync of the file (before the
+    # rename) and of the directory (after) make this durable even across a hard machine
+    # crash / power loss, not just a process kill. Cost is negligible next to a rollout.
+    tmp_path = path.with_name(path.name + ".tmp")
+    with tmp_path.open("w", encoding = "utf-8") as f:
+        json.dump(payload, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+    dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+def _load_inference_ckpt(args, rank, world_size, num_samples, err_agg_list):
+    """Restore accumulated errors from a previous run and return the number of already
+    completed batches (0 if there is no usable checkpoint)."""
+    path = _inference_ckpt_path(args, rank)
+    if not path.exists():
+        logger.info("[rank %s] No inference checkpoint at %s; starting from scratch.", rank, path)
+        return 0
+    with path.open("r", encoding = "utf-8") as f:
+        payload = json.load(f)
+    expected = _inference_ckpt_signature(args, rank, world_size, num_samples)
+    if payload.get("signature") != expected:
+        raise RuntimeError(
+            f"Inference checkpoint at {path} does not match the current run configuration; "
+            f"refusing to resume (this would corrupt the aggregated metrics). Delete the file "
+            f"to start fresh, or drop --resume_inference.\n"
+            f"  checkpoint: {payload.get('signature')}\n"
+            f"  current:    {expected}"
+        )
+    for metric_idx, metric in enumerate(args.eval_metric):
+        _merge_state_into_err_agg(err_agg_list[metric_idx], payload["metrics"][metric])
+    completed = int(payload.get("completed_batches", 0))
+    logger.info(
+        "[rank %s] Resuming inference from %s: %s batch(es) already completed.",
+        rank, path, completed,
+    )
+    return completed
 
 def load_Aurora_weight(
     Aurora_model,
@@ -388,7 +493,10 @@ def _build_boundary_batch(
     atmos_vars = {}
 
     for base_time, target_time in zip(base_times, target_times):
-        data = boundary_dataset.get_boundary_at_time(base_time, target_time)
+        # netCDF/HDF5 is not thread-safe: serialise this file read against the lazy
+        # target-prefetch thread (see NETCDF_IO_LOCK in datasets/ERA5TWDatasetforAurora.py).
+        with NETCDF_IO_LOCK:
+            data = boundary_dataset.get_boundary_at_time(base_time, target_time)
         if data is None:
             return None
         for var_name, tensor in data["surf_vars"].items():
@@ -408,7 +516,10 @@ def _get_boundary_source_on_device(
 ):
     if base_time in gpu_cache:
         return gpu_cache[base_time]
-    source = boundary_dataset.get_boundary_source(base_time)
+    # netCDF/HDF5 is not thread-safe: serialise this file read against the lazy
+    # target-prefetch thread (see NETCDF_IO_LOCK in datasets/ERA5TWDatasetforAurora.py).
+    with NETCDF_IO_LOCK:
+        source = boundary_dataset.get_boundary_source(base_time)
     gpu_source = {
         "time_values": source["time_values"],
         "surf_vars": {},
@@ -654,7 +765,11 @@ def AuroraBatch_2_nc_files(
         gen_result_folder = Path(args.gen_result_folder)
         output_path = gen_result_folder / output_file_name
 
-        ds.to_netcdf( output_path )
+        # netCDF/HDF5 is not thread-safe: this write runs on the main thread inside the
+        # rollout loop, potentially while the lazy target-prefetch thread is reading target
+        # files. Serialise via the shared lock.
+        with NETCDF_IO_LOCK:
+            ds.to_netcdf( output_path )
 
 def model_forward_with_latent_boundary(model, batch_main, batch_bc, args):
     """
@@ -858,6 +973,46 @@ def model_forward_with_latent_boundary(model, batch_main, batch_bc, args):
     pred = pred.unnormalise(surf_stats=model.surf_stats)
     return pred
 
+def _lazy_produce_target(ds_ref, dates, step, device, copy_stream):
+    """
+    Runs on the single lazy-prefetch worker thread.
+
+    1. Read one rollout-step target from disk (releases the GIL during netCDF I/O,
+       so it overlaps with GPU compute on the main thread).
+    2. Asynchronously stage it onto the GPU on a dedicated copy stream, so the target
+       becomes GPU-resident ahead of time (targets t..t+n-1 all live on the GPU at once)
+       while the H2D DMA overlaps with model compute on the default stream.
+
+    Returns (gpu_data_dict, copy_done_event). The event is recorded on copy_stream and
+    the main thread must wait on it (on the compute stream) before using the tensors.
+    For a CPU device there is no stream/event; tensors are returned already on-device
+    and the event is None.
+    """
+    cpu_dict = ds_ref.load_single_target(
+        base_datetime_strs = dates,
+        rollout_step_index = step,
+    )
+
+    if copy_stream is None:
+        # CPU device (or no async path): move directly, no stream/event needed.
+        out = {
+            "surf_vars": {k: v.to(device) for k, v in cpu_dict["surf_vars"].items()},
+            "atmos_vars": {k: v.to(device) for k, v in cpu_dict["atmos_vars"].items()},
+        }
+        return out, None
+
+    out = {"surf_vars": {}, "atmos_vars": {}}
+    # Enqueue the H2D copies on the copy stream. Source tensors are pinned so the copy
+    # is a true async DMA; the pinned staging buffers are handed to PyTorch's caching
+    # host allocator, which defers their reuse until the copy-stream event completes,
+    # so the CPU keeps only ~1 batch alive at a time rather than an n-deep buffer.
+    with torch.cuda.stream(copy_stream):
+        for section in ("surf_vars", "atmos_vars"):
+            for k, cpu_t in cpu_dict[section].items():
+                out[section][k] = cpu_t.pin_memory().to(device, non_blocking = True)
+        event = copy_stream.record_event()
+    return out, event
+
 def evaluate(
     args,
     model,
@@ -868,6 +1023,7 @@ def evaluate(
     boundary_dataset = None,
     rank = 0,
     metadata_dataset = None,
+    world_size = 1,
 ):
     model.eval()
     ds_ref = metadata_dataset if metadata_dataset is not None else dataloader.dataset
@@ -891,12 +1047,38 @@ def evaluate(
         flip_lat = False
         flip_lon = False
 
+    # Lazy-mode GPU prefetch machinery:
+    #  - a single background thread reads target t+n-1 from disk and enqueues its H2D copy,
+    #  - a dedicated CUDA copy stream runs those transfers so they overlap with model
+    #    compute on the default stream and targets t..t+n-1 stay GPU-resident,
+    #  - CUDA events synchronise the compute stream against each target's copy completion.
+    lazy_prefetch_executor = None
+    lazy_copy_stream = None
+    if args.lazy_mode:
+        from concurrent.futures import ThreadPoolExecutor
+        # One worker is enough: it only needs to produce a single new target (t+n-1) per step.
+        lazy_prefetch_executor = ThreadPoolExecutor(max_workers = 1)
+        if device.type == "cuda":
+            lazy_copy_stream = torch.cuda.Stream(device = device)
+
+    # --- Inference-progress checkpoint (always-on) ---
+    # Restore accumulated errors and the completed-batch count so a killed run can resume.
+    # Saving happens after every batch; loading only when --resume_inference is set.
+    num_samples = len(dataloader.dataset)
+    start_batch = 0
+    if getattr(args, "resume_inference", False):
+        start_batch = _load_inference_ckpt(args, rank, world_size, num_samples, err_agg_list)
+
     # Optimization: Use inference_mode to reduce memory for gradients
     with torch.inference_mode():
-        for batch in tqdm(dataloader, desc = f"Evaluating(rank={rank})", disable = (rank != 0)):
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc = f"Evaluating(rank={rank})", disable = (rank != 0))):
         # for batch in dataloader:
             # if (rank == 0):
             #     print("----------------------------------------")
+            # Skip batches already processed in a previous (resumed) run. The dataloader
+            # iterates deterministically (shuffle=False), so batch_idx maps to the same data.
+            if batch_idx < start_batch:
+                continue
             if args.lazy_mode:
                 # --- Lazy version: batch is (inputs, dates), no pre-loaded labels ---
                 inputs, dates = batch
@@ -1030,6 +1212,26 @@ def evaluate(
                             single_steps.append(b_single)
                         prefetched_boundary[k] = _stack_boundary_time_window(single_steps)
 
+            # --- Lazy GPU-prefetch window setup (per batch) ---
+            # Keep up to n targets in flight (t..t+n-1), each read on the worker thread and
+            # staged onto the GPU via the copy stream. Priming submits steps 1..n-1 so that
+            # inside the rollout loop step t only submits step t+n-1, holding the window at n.
+            # NOTE: this must stay AFTER the boundary prefetch above — boundary loading reads
+            # netCDF files on the main thread, and the worker is guaranteed idle here (its
+            # window fully drains at the end of each batch's rollout loop). Every remaining
+            # netCDF touchpoint (worker target reads, boundary reads, prediction writes) is
+            # additionally serialised via NETCDF_IO_LOCK, since the HDF5 C library is not
+            # thread-safe even across different files.
+            lazy_target_futures = None
+            _lazy_n = 1
+            if args.lazy_mode:
+                _lazy_n = max(1, getattr(args, "lazy_prefetch_steps", 1))
+                lazy_target_futures = {}
+                for _s in range(1, min(_lazy_n - 1, args.rollout_step) + 1):
+                    lazy_target_futures[_s] = lazy_prefetch_executor.submit(
+                        _lazy_produce_target, ds_ref, dates, _s, device, lazy_copy_stream
+                    )
+
             metadata_lat = latitudes
             metadata_lon = longitude
 
@@ -1093,17 +1295,27 @@ def evaluate(
 
                     # 1. Get the corresponding label for this specific step
                     if args.lazy_mode:
-                        # --- LAZY TARGET LOADING ---
-                        # Load only this one target from disk and stream it to GPU,
-                        # instead of pre-loading/moving the whole rollout's targets upfront.
-                        _label_data = ds_ref.load_single_target(
-                            base_datetime_strs = dates,
-                            rollout_step_index = t,
-                        )
-                        for _k_var in _label_data["surf_vars"]:
-                            _label_data["surf_vars"][_k_var] = _label_data["surf_vars"][_k_var].to(device)
-                        for _k_var in _label_data["atmos_vars"]:
-                            _label_data["atmos_vars"][_k_var] = _label_data["atmos_vars"][_k_var].to(device)
+                        # --- LAZY GPU PREFETCH ---
+                        # Kick off producing the newest target in the window (t+n-1): the worker
+                        # reads it from disk and the copy stream stages it onto the GPU, overlapping
+                        # with this step's compute. Then consume target t, which was submitted n-1
+                        # steps ago and is (already / almost) GPU-resident.
+                        _prefetch_step = t + _lazy_n - 1
+                        if _prefetch_step <= args.rollout_step and _prefetch_step not in lazy_target_futures:
+                            lazy_target_futures[_prefetch_step] = lazy_prefetch_executor.submit(
+                                _lazy_produce_target, ds_ref, dates, _prefetch_step, device, lazy_copy_stream
+                            )
+                        # .result() only blocks until the disk read + copy enqueue finished; the
+                        # actual H2D transfer is synchronised on the GPU via the copy event below.
+                        _label_data, _copy_event = lazy_target_futures.pop(t).result()
+                        if _copy_event is not None:
+                            # Make the compute (default) stream wait for the copy to complete, and
+                            # tell the caching allocator the default stream now uses these tensors
+                            # (they were allocated on the copy stream) so they are not freed early.
+                            torch.cuda.current_stream().wait_event(_copy_event)
+                            for _section in ("surf_vars", "atmos_vars"):
+                                for _k_var in _label_data[_section]:
+                                    _label_data[_section][_k_var].record_stream(torch.cuda.current_stream())
                     else:
                         _label_data = _label_list[step_index]
 
@@ -1227,10 +1439,21 @@ def evaluate(
             rollout_batch = None
             if prefetched_boundary is not None:
                 prefetched_boundary.clear()
+            if lazy_target_futures is not None:
+                lazy_target_futures.clear()
             import gc
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+
+            # Persist inference progress: this batch's errors are now folded into
+            # err_agg_list, so record it as completed. Atomic write (see helper).
+            _save_inference_ckpt(
+                args, rank, world_size, num_samples, batch_idx + 1, err_agg_list,
+            )
+
+    if lazy_prefetch_executor is not None:
+        lazy_prefetch_executor.shutdown(wait = True)
 
 def export_agg_to_csv(
         args,
@@ -1283,12 +1506,32 @@ def export_agg_to_csv(
     df.to_csv(out_path)
     return df
 
-def _mp_worker_entry(rank, world_size, args):
+def _mp_worker_entry(rank, world_size, args, cuda_available):
+    # Restrict this process to its single assigned physical GPU BEFORE any CUDA API
+    # call. CUDA_VISIBLE_DEVICES is inherited from the parent shell (all GPUs), so
+    # without this every rank sees every GPU; CUDA's lazy runtime init always does its
+    # (heavy) first-touch initialization against "current device" = index 0, regardless
+    # of which device this rank later calls set_device() on. That leaves a phantom
+    # context on physical GPU 0 from every other rank, inflating its memory usage.
+    # Narrowing visibility here makes "device 0" inside this process BE this rank's GPU,
+    # so no rank can ever leak a context onto another rank's GPU. `cuda_available` is
+    # computed once in the parent so nothing here calls torch.cuda.* before narrowing.
+    #
+    # Bind to the physical GPU id the user actually selected (args.gpu_list[rank]), NOT
+    # str(rank): with --gpus 0,1,4,6 the four ranks must land on physical GPUs 0,1,4,6,
+    # not 0,1,2,3. This value overrides the parent's CUDA_VISIBLE_DEVICES entirely, and
+    # since CUDA_DEVICE_ORDER=PCI_BUS_ID is exported by the launch script the id maps to
+    # the same physical device nvidia-smi shows. Fall back to str(rank) when no explicit
+    # GPU list was given (e.g. --mp_world_size / CUDA_VISIBLE_DEVICES-derived world size).
+    if cuda_available:
+        gpu_list = getattr(args, "gpu_list", None)
+        physical_gpu = str(gpu_list[rank]) if gpu_list else str(rank)
+        os.environ["CUDA_VISIBLE_DEVICES"] = physical_gpu
+
     set_seed(args.seed + rank)
-    if torch.cuda.is_available():
-        gpu_id = int(rank)
-        torch.cuda.set_device(gpu_id)
-        device = torch.device(f"cuda:{gpu_id}")
+    if cuda_available:
+        torch.cuda.set_device(0)
+        device = torch.device("cuda:0")
     else:
         device = torch.device("cpu")
 
@@ -1315,6 +1558,7 @@ def _mp_worker_entry(rank, world_size, args):
         boundary_dataset = boundary_dataset,
         rank = rank,
         metadata_dataset = full_dataset,
+        world_size = world_size,
     )
 
     tmp_root = Path(args.csv_output_folder) if args.csv_output_folder is not None else Path(args.gen_result_folder)
@@ -1372,6 +1616,7 @@ def main():
             boundary_dataset = boundary_dataset,
             rank = 0,
             metadata_dataset = dataset,
+            world_size = 1,
         )
 
         for metric, err_agg in zip(args.eval_metric, err_agg_list):
@@ -1385,11 +1630,16 @@ def main():
 
     logger.info("Running multiprocessing evaluation with world_size=%s", world_size)
 
+    # Computed once in the parent (harmless here) and handed to each child so that no
+    # child ever calls torch.cuda.* before it has narrowed CUDA_VISIBLE_DEVICES to its
+    # own assigned GPU (see _mp_worker_entry).
+    cuda_available = torch.cuda.is_available()
+
     mp_ctx = mp.get_context("spawn")
 
     processes = []
     for rank in range(world_size):
-        p = mp_ctx.Process(target = _mp_worker_entry, args = (rank, world_size, args))
+        p = mp_ctx.Process(target = _mp_worker_entry, args = (rank, world_size, args, cuda_available))
         p.start()
         processes.append(p)
 

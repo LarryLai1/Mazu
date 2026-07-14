@@ -82,23 +82,23 @@ batch_size=8
 start_time="2020-03-01 00:00:00"
 if [[ "${pred}" == "true" ]]; then
     # end_time="2020-04-01 00:00:00"
-    end_time="2020-03-02 00:00:00"
-    # extra_args=("--save_rollout_step" 72)
-    extra_args=("--save_rollout_step" $(seq 1 24) $(seq 24 6 72))
+    # end_time="2020-01-02 01:00:00"
+    end_time="2020-03-01 01:00:00"
+    extra_args=("--save_rollout_step" $(seq 1 24) $(seq 24 6 240))
     # extra_args=("--save_rollout_step" $(seq 1 24) 36 48 60 72)
     output_root="/tmp3/b12902101/LAM_output_preds"
-    # batch_size=1
-    # CUDA_VISIBLE_DEVICES_VALUE=${CUDA_VISIBLE_DEVICES_VALUE:0:1}
-    # export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
+    batch_size=1
+    CUDA_VISIBLE_DEVICES_VALUE=${CUDA_VISIBLE_DEVICES_VALUE:0:1}
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 else
-    end_time="2020-04-01 00:00:00"
+    end_time="2020-12-21 00:00:00"
     extra_args=()
     output_root="/tmp3/b12902101/LAM_output"
 fi
 # start_time="2020-12-31 00:00:00"
 # end_time="2020-12-31 23:00:00"
 aurora_boundary_root="/tmp3/b12902101/earth2/outputs"
-era5_boundary_root="/tmp3/b12902101/era5_tw_forecast_3d"
+era5_boundary_root="/tmp3/b12902101/era5_tw_forecast_0.25deg"
 ground_truth_root="/tmp3/yunye0121/era5_tw"
 
 # boundary_source="ground_truth"
@@ -120,6 +120,13 @@ else
 fi
 
 touch "${LOG_FILE}"
+
+# Inference-progress checkpoints are always written by the python script. To resume a
+# previous run that was killed mid-inference, invoke with RESUME_INFERENCE=1 (or true).
+resume_args=()
+if [[ "${RESUME_INFERENCE:-}" == "1" || "${RESUME_INFERENCE:-}" == "true" ]]; then
+    resume_args=("--resume_inference")
+fi
 
 time \
 python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
@@ -154,5 +161,7 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --gen_result_folder "${OUTPUT_FOLDER_NAME}/preds" \
     --gpus "${CUDA_VISIBLE_DEVICES_VALUE}" \
     --lazy_mode \
+    --lazy_prefetch_steps 2 \
+    "${resume_args[@]}" \
     "${extra_args[@]}" \
     # 2>&1 | tee "${LOG_FILE}"

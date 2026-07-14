@@ -39,7 +39,8 @@ def main():
     # Instantiate ground truth dataset
     data_root_dir = "/tmp3/yunye0121/era5_tw"
     
-    lead_times = list(range(1, 25)) + [36, 48, 60, 72]
+    lead_times = [1] + list(range(24, 241, 24))
+    # lead_times = list(range(1, 25)) + [36, 48, 60, 72]
     init_time = pd.Timestamp(args.init_time)
     start_time = init_time
     end_time = init_time + pd.Timedelta(hours=max(lead_times))
@@ -89,7 +90,8 @@ def main():
             is_era5_forecast = True
 
     if is_era5_forecast:
-        lead_times = list(range(0, 73, 6))
+        lead_times = list(range(0, 241, 24))
+        # lead_times = list(range(0, 73, 6))
         from datasets.BoundaryConditionDataset import BoundaryConditionDataset_ERA5
         era5_init_time = init_time.floor('12h')
         ds_bd = BoundaryConditionDataset_ERA5(
@@ -201,7 +203,7 @@ def main():
                 vmax = max(abs(residual.min()), abs(residual.max()))
                 im = ax.pcolormesh(lon_arr, lat_arr, residual, cmap='bwr', vmin=-vmax, vmax=vmax, shading='auto', transform=ccrs.PlateCarree())
             else:
-                im = ax.pcolormesh(lon_arr, lat_arr, pred_val, cmap='viridis', shading='auto', transform=ccrs.PlateCarree())
+                im = ax.pcolormesh(lon_arr, lat_arr, pred_val, cmap='viridis', vmin=99000, vmax=103500, shading='auto', transform=ccrs.PlateCarree())
                 
             ax.set_title(f"+{lt}hr ({target_time.strftime('%m-%d %H:00')})")
             fig.colorbar(im, ax=ax)

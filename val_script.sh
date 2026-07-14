@@ -17,9 +17,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_SCRIPT="${SCRIPT_DIR}/public_bash_scripts/AuroraSmallTW_gen_eval_pipeline_custom_rollout.sh"
 BOUNDARY_MODE="inject-inside"
 
-GPU="0,1,2,3"
-# GPU="4,5,6,7"
-# GPU="0"
+# GPU="0,1,4,6"
+GPU="4"
 
 for interp in "nearest"; do
     for smooth in "no"; do
@@ -37,10 +36,10 @@ for interp in "nearest"; do
     done
 done
 
-# "${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width 0 --boundary_mode "inject-inside" \
-#         --boundary_pooling no --boundary_smooth_mode "no" \
-#         --boundary_time_interp_mode exact \
-#         --pred "true"
+"${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width 0 --boundary_mode "inject-inside" \
+        --boundary_pooling no --boundary_smooth_mode "no" \
+        --boundary_time_interp_mode exact \
+        --pred "true"
 
 TOTAL_TIME=$((SECONDS))
 echo "All jobs completed in ${TOTAL_TIME}s."
