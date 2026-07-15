@@ -462,6 +462,10 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
         interp_mode: str = "forward",
         use_cache: bool = False,
         time_interp_mode: str = "interpolation",
+        target_latitude=None,
+        target_longitude=None,
+        boundary_resolution: float = 0.25,
+        lowres_apply_mode: str = "interp",
     ) -> None:
         super().__init__()
         self.boundary_root_dir = boundary_root_dir
@@ -490,6 +494,22 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
             end = self.end_date_hour,
             freq = f"{self.forecast_cycle_hours}h",
         )
+        # --- Low-resolution boundary support ---------------------------------------------
+        # The model consumes boundary tensors on its own 0.25deg grid (the boundary latents
+        # are replaced by index, see model_forward_with_latent_boundary). So any low-res
+        # variant is coarsened and then brought back onto the model grid HERE, inside the
+        # loader, keeping boundary_width/latent replacement in 0.25deg model-grid units.
+        self.target_latitude = None if target_latitude is None else torch.as_tensor(target_latitude, dtype = torch.float64)
+        self.target_longitude = None if target_longitude is None else torch.as_tensor(target_longitude, dtype = torch.float64)
+        self.boundary_resolution = float(boundary_resolution)
+        self.lowres_apply_mode = lowres_apply_mode
+        if self.lowres_apply_mode not in ("direct", "interp"):
+            raise ValueError(f"Unsupported lowres_apply_mode: {self.lowres_apply_mode}")
+        # 0.5deg: pool the native 0.25deg source by 2 (native grid == model grid).
+        self.coarsen_factor = 2 if abs(self.boundary_resolution - 0.5) < 1e-6 else 1
+        # 1.5deg: native low-res on disk on a different grid, needs coordinate regrid.
+        self.native_lowres_regrid = abs(self.boundary_resolution - 1.5) < 1e-6
+
         self._cache = {}
         self._cache_latitude = None
         self._cache_longitude = None
@@ -682,6 +702,10 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
                 )
                 if "time" in data_array.dims:
                     data_array = data_array.sel(time = date_hour)
+                # Some sources (e.g. the 1.5deg files) store dims as (..., longitude,
+                # latitude); force lat/lon to be the last two dims so the flip and any
+                # downstream regrid are correct regardless of on-disk order.
+                data_array = data_array.transpose(..., "latitude", "longitude")
                 val_tensor = torch.as_tensor(data_array.values)
                 if flip_lat:
                     val_tensor = torch.flip(val_tensor, dims=(-2,))
@@ -697,11 +721,14 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
                     data_array = data_array.sel(time = date_hour)
                 if level_dim in data_array.dims:
                     data_array = data_array.sel({level_dim: self.levels})
+                data_array = data_array.transpose(..., "latitude", "longitude")
                 val_tensor = torch.as_tensor(data_array.values)
                 if flip_lat:
                     val_tensor = torch.flip(val_tensor, dims=(-2,))
                 source["atmos_vars"][upper_var] = val_tensor
 
+        # Coarsen (0.5deg) or coordinate-regrid (1.5deg) onto the model grid; no-op at 0.25deg.
+        source = self._to_model_grid(source)
         return source
 
     @staticmethod
@@ -717,6 +744,85 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
         pooled = F.avg_pool2d(tensor.reshape(-1, 1, spatial_shape[0], spatial_shape[1]), kernel_size = 2, stride = 2)
         restored = F.interpolate(pooled, size = spatial_shape, mode = "bilinear", align_corners = False)
         return restored.reshape(*leading_shape, spatial_shape[0], spatial_shape[1])
+
+    # --- Low-resolution boundary transforms ----------------------------------------------
+    def _to_model_grid(self, source: dict) -> dict:
+        """Bring every boundary field onto the model's 0.25deg grid.
+
+        0.25deg baseline: no-op. 0.5deg: average-pool the native 0.25deg field by 2 then
+        upsample back to the same grid (block replicate for 'direct', bilinear for 'interp').
+        1.5deg: coordinate-regrid the native low-res field onto the model lat/lon grid
+        (nearest for 'direct', linear for 'interp')."""
+        if self.coarsen_factor == 1 and not self.native_lowres_regrid:
+            return source
+
+        src_lat = source["latitude"].double()
+        src_lon = source["longitude"].double()
+
+        def xform(t: torch.Tensor) -> torch.Tensor:
+            if t.ndim < 2:
+                return t
+            if self.native_lowres_regrid:
+                return self._regrid_to_target(t, src_lat, src_lon)
+            return self._coarsen_then_upsample(t, self.coarsen_factor, self.lowres_apply_mode)
+
+        for section in ("surf_vars", "atmos_vars"):
+            for key in list(source[section].keys()):
+                source[section][key] = xform(source[section][key])
+
+        # After a coordinate regrid the fields live on the model grid, so advertise it (keeps
+        # get_latitude_longitude() and flip-alignment consistent). The pool path keeps the
+        # native 0.25deg grid, which already equals the model grid.
+        if self.native_lowres_regrid and self.target_latitude is not None:
+            source["latitude"] = self.target_latitude.clone()
+            source["longitude"] = self.target_longitude.clone()
+        return source
+
+    @staticmethod
+    def _coarsen_then_upsample(tensor: torch.Tensor, factor: int, mode: str) -> torch.Tensor:
+        H, W = tensor.shape[-2:]
+        leading = tensor.shape[:-2]
+        x = tensor.reshape(-1, 1, H, W).float()
+        pooled = F.avg_pool2d(x, kernel_size = factor, stride = factor)  # e.g. 156x200 -> 78x100
+        if mode == "direct":
+            # Each low-res cell occupies its exact factor x factor footprint (block replicate),
+            # then crop back to the original grid (no-op when factor divides H and W).
+            up = pooled.repeat_interleave(factor, dim = -2).repeat_interleave(factor, dim = -1)
+            up = up[..., :H, :W]
+        else:  # interp
+            up = F.interpolate(pooled, size = (H, W), mode = "bilinear", align_corners = False)
+        return up.reshape(*leading, H, W).to(tensor.dtype)
+
+    def _regrid_to_target(self, tensor: torch.Tensor, src_lat: torch.Tensor, src_lon: torch.Tensor) -> torch.Tensor:
+        from scipy.interpolate import RegularGridInterpolator as RGI
+
+        if self.target_latitude is None or self.target_longitude is None:
+            raise ValueError("Low-res regrid requested but target_latitude/target_longitude were not provided.")
+
+        method = "nearest" if self.lowres_apply_mode == "direct" else "linear"
+        tgt_lat = self.target_latitude.numpy()
+        tgt_lon = self.target_longitude.numpy()
+
+        # RGI requires strictly ascending axes; sort and remember the permutation.
+        lat_np = src_lat.numpy()
+        lon_np = src_lon.numpy()
+        ilat = np.argsort(lat_np)
+        ilon = np.argsort(lon_np)
+        slat = lat_np[ilat]
+        slon = lon_np[ilon]
+
+        H, W = tensor.shape[-2:]
+        leading = tensor.shape[:-2]
+        flat = tensor.reshape(-1, H, W).double().numpy()
+        gy, gx = np.meshgrid(tgt_lat, tgt_lon, indexing = "ij", sparse = True)
+
+        out = np.empty((flat.shape[0], tgt_lat.shape[0], tgt_lon.shape[0]), dtype = np.float64)
+        for i, v in enumerate(flat):
+            v = v[ilat][:, ilon]
+            rgi = RGI((slat, slon), v, method = method, bounds_error = False, fill_value = None)
+            out[i] = rgi((gy, gx))
+        out = out.reshape(*leading, tgt_lat.shape[0], tgt_lon.shape[0])
+        return torch.from_numpy(out).to(tensor.dtype)
 
     def _load_boundary_source_from_files(self, date_hour: pd.Timestamp) -> dict:
         source = self._load_era5_source_from_files(date_hour)

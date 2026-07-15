@@ -17,8 +17,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_SCRIPT="${SCRIPT_DIR}/public_bash_scripts/AuroraSmallTW_gen_eval_pipeline_custom_rollout.sh"
 BOUNDARY_MODE="inject-inside"
 
-# GPU="0,1,4,6"
-GPU="4"
+GPU="0,1,2,3"
+# GPU="4"
 
 for interp in "nearest"; do
     for smooth in "no"; do
@@ -30,6 +30,7 @@ for interp in "nearest"; do
             "${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width 8 --boundary_mode "${BOUNDARY_MODE}" \
                 --boundary_pooling "no" --boundary_smooth_mode "${smooth}" \
                 --boundary_time_interp_mode "${interp}" --replace_boundary_position "${bd_position}" \
+                --boundary_resolution 0.5 --boundary_lowres_apply_mode "direct" \
                 --pred "true" \
                 # 2>&1 | tee "${LOG_FILE}"
         done

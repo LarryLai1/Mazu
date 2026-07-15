@@ -104,6 +104,25 @@ def parse_args():
         help = "Select where to replace the boundary latents.",
     )
     parser.add_argument(
+        "--boundary_resolution",
+        type = float,
+        default = 0.25,
+        choices = [0.25, 0.5, 1.5],
+        help = "Boundary source resolution. 0.25=native baseline; 0.5=pool the 0.25deg source by "
+               "2 on the fly; 1.5=native low-res dir (point --boundary_root_dir at "
+               "era5_tw_forecast_1.5deg). Only used for --boundary_source era5. Do NOT combine "
+               "0.5 with --boundary_pooling yes (double pooling).",
+    )
+    parser.add_argument(
+        "--boundary_lowres_apply_mode",
+        type = str,
+        default = "interp",
+        choices = ["direct", "interp"],
+        help = "How a low-res boundary is mapped onto the model 0.25deg grid: direct=block/nearest "
+               "footprint (each low-res pixel fills its NxN model cells); interp=bilinear/linear. "
+               "Ignored at --boundary_resolution 0.25.",
+    )
+    parser.add_argument(
         "--gpu_cache",
         action = "store_true",
         help = "Enable GPU boundary cache and preload boundary files into memory.",
@@ -388,7 +407,7 @@ def create_dataset(args):
     )
     return ds
 
-def create_boundary_dataset(args):
+def create_boundary_dataset(args, target_latitude = None, target_longitude = None):
     if not args.boundary_root_dir:
         return None
     logger.info("Creating Boundary Condition dataset...")
@@ -428,6 +447,10 @@ def create_boundary_dataset(args):
             enable_pooling = (args.boundary_pooling == "yes"),
             use_cache = args.boundary_use_cache,
             time_interp_mode = internal_time_interp_mode,
+            target_latitude = target_latitude,
+            target_longitude = target_longitude,
+            boundary_resolution = args.boundary_resolution,
+            lowres_apply_mode = args.boundary_lowres_apply_mode,
         )
     elif args.boundary_source == "ground_truth":
         return BoundaryConditionDataset_GroundTruth(
@@ -1538,7 +1561,9 @@ def _mp_worker_entry(rank, world_size, args, cuda_available):
     model = create_model(args, device)
     full_dataset = create_dataset(args)
     eval_dataset = _manual_split_dataset(full_dataset, rank, world_size)
-    boundary_dataset = create_boundary_dataset(args)
+    # Pass the model's 0.25deg grid so a low-res boundary is regridded onto it in the loader.
+    _model_lat, _model_lon = full_dataset.get_latitude_longitude()
+    boundary_dataset = create_boundary_dataset(args, target_latitude = _model_lat, target_longitude = _model_lon)
     dataloader = DataLoader(
         eval_dataset,
         batch_size = args.batch_size,
@@ -1602,7 +1627,9 @@ def main():
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = create_model(args, device)
         dataset = create_dataset(args)
-        boundary_dataset = create_boundary_dataset(args)
+        # Pass the model's 0.25deg grid so a low-res boundary is regridded onto it in the loader.
+        _model_lat, _model_lon = dataset.get_latitude_longitude()
+        boundary_dataset = create_boundary_dataset(args, target_latitude = _model_lat, target_longitude = _model_lon)
         dataloader = DataLoader(dataset, batch_size = args.batch_size, shuffle = False, num_workers = args.num_workers, pin_memory = True)
         criterion_list, err_agg_list = _build_metric_lists(args, total_count = len(dataset))
 
