@@ -8,6 +8,10 @@ import xarray as xr
 
 
 class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
+    # The aurora files store a per-cycle forecast trajectory, so (like era5) this source can be
+    # served through the pipeline's prediction_timedelta fast path. GroundTruth overrides this.
+    uses_forecast_source = True
+
     def __init__(
         self,
         boundary_root_dir: str,
@@ -126,6 +130,7 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
         return restored.reshape(*leading_shape, spatial_shape[0], spatial_shape[1])
 
     def _load_boundary_source_from_files(self, date_hour: pd.Timestamp) -> dict:
+        date_hour = pd.Timestamp(date_hour)
         upper_path, surface_path = self._dt_to_path(date_hour)
         latitude_bounds, longitude_bounds = self._spatial_bounds()
 
@@ -137,10 +142,29 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
             longitude_slice = self._build_coord_slice(upper_nc.lon.values, longitude_bounds)
             level_dim = "level" if "level" in upper_nc.dims else "pressure_level"
 
+            time_values = pd.DatetimeIndex(pd.to_datetime(upper_nc.time.values))
+            # Aurora files carry an absolute `time` trajectory instead of a prediction_timedelta
+            # coordinate; derive the lead time (hours from the file's base/init time) so downstream
+            # selection matches the era5 path exactly.
+            prediction_timedelta_hours = torch.as_tensor(
+                (time_values - date_hour) / pd.Timedelta(hours = 1),
+                dtype = torch.float32,
+            )
+
+            # Force latitude descending and lat/lon as the last two dims, mirroring the era5 loader,
+            # so the boundary always leaves the loader in the model's orientation regardless of the
+            # on-disk coordinate order.
+            raw_lat = torch.as_tensor(upper_nc.lat.sel(lat = latitude_slice).values)
+            raw_lon = torch.as_tensor(upper_nc.lon.sel(lon = longitude_slice).values)
+            flip_lat = (raw_lat[1] > raw_lat[0]).item() if raw_lat.numel() > 1 else False
+            if flip_lat:
+                raw_lat = torch.flip(raw_lat, dims = (0,))
+
             source = {
-                "time_values": pd.DatetimeIndex(pd.to_datetime(upper_nc.time.values)),
-                "latitude": torch.as_tensor(upper_nc.lat.sel(lat = latitude_slice).values),
-                "longitude": torch.as_tensor(upper_nc.lon.sel(lon = longitude_slice).values),
+                "time_values": time_values,
+                "prediction_timedelta_hours": prediction_timedelta_hours,
+                "latitude": raw_lat,
+                "longitude": raw_lon,
                 "levels": tuple(upper_nc[level_dim].sel({level_dim: self.levels}).values),
                 "surf_vars": {},
                 "atmos_vars": {},
@@ -152,7 +176,11 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
                     lat = latitude_slice,
                     lon = longitude_slice,
                 )
-                source["surf_vars"][mapped_name] = torch.as_tensor(data_array.values)
+                data_array = data_array.transpose(..., "lat", "lon")
+                val_tensor = torch.as_tensor(data_array.values)
+                if flip_lat:
+                    val_tensor = torch.flip(val_tensor, dims = (-2,))
+                source["surf_vars"][mapped_name] = val_tensor
 
             for upper_var in self.upper_variables:
                 data_array = upper_nc[upper_var].sel(
@@ -161,8 +189,15 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
                 )
                 if level_dim in data_array.dims:
                     data_array = data_array.sel({level_dim: self.levels})
-                source["atmos_vars"][upper_var] = torch.as_tensor(data_array.values)
+                data_array = data_array.transpose(..., "lat", "lon")
+                val_tensor = torch.as_tensor(data_array.values)
+                if flip_lat:
+                    val_tensor = torch.flip(val_tensor, dims = (-2,))
+                source["atmos_vars"][upper_var] = val_tensor
 
+        # Keep instance-level prediction_timedelta metadata in sync with the loaded file (as era5 does).
+        self.prediction_timedelta_hours = tuple(float(x) for x in prediction_timedelta_hours.tolist())
+        self.prediction_timedeltas = tuple(pd.Timedelta(hours = float(x)) for x in self.prediction_timedelta_hours)
         return source
 
     def _build_cache(self) -> None:
@@ -292,25 +327,16 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
     def get_latitude_longitude(self):
         if self.use_cache:
             return self._cache_latitude, self._cache_longitude
-        upper_path, _ = self._dt_to_path(self.time_axis[0])
-        latitude_bounds, longitude_bounds = self._spatial_bounds()
-        with xr.open_dataset(upper_path, decode_timedelta = True) as upper_nc:
-            upper_nc.load()
-            latitude_slice = self._build_coord_slice(upper_nc.lat.values, latitude_bounds)
-            longitude_slice = self._build_coord_slice(upper_nc.lon.values, longitude_bounds)
-            latitude = upper_nc.lat.sel(lat = latitude_slice).values
-            longitude = upper_nc.lon.sel(lon = longitude_slice).values
-        return torch.tensor(latitude), torch.tensor(longitude)
+        # Return the orientation-normalized coords from the source so the advertised lat/lon always
+        # match the (possibly flipped) field tensors, keeping the pipeline flip-alignment consistent.
+        source = self.get_boundary_source(self.time_axis[0])
+        return source["latitude"], source["longitude"]
 
     def get_levels(self):
         if self.use_cache:
             return self._cache_levels
-        upper_path, _ = self._dt_to_path(self.time_axis[0])
-        with xr.open_dataset(upper_path, decode_timedelta = True) as upper_nc:
-            upper_nc.load()
-            level_dim = "level" if "level" in upper_nc.dims else "pressure_level"
-            levels = upper_nc[level_dim].values
-        return tuple(levels)
+        source = self.get_boundary_source(self.time_axis[0])
+        return source["levels"]
 
     def get_base_time(self, target_time: pd.Timestamp) -> pd.Timestamp:
         target_time = pd.Timestamp(target_time)
@@ -322,6 +348,101 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
             return self._cache[base_time]
         return self._load_boundary_source_from_files(base_time)
 
+    # --- prediction_timedelta (lead-time) selection: parity with the era5 boundary path ----------
+    @staticmethod
+    def _prediction_timedelta_bracketing_indices(
+        prediction_timedelta_hours: torch.Tensor,
+        target_prediction_timedelta_hours: float,
+    ) -> tuple[int, int, torch.Tensor]:
+        if prediction_timedelta_hours.numel() == 0:
+            raise ValueError("Boundary file must contain at least one prediction_timedelta entry.")
+
+        target = torch.as_tensor(
+            float(target_prediction_timedelta_hours),
+            device = prediction_timedelta_hours.device,
+            dtype = prediction_timedelta_hours.dtype,
+        )
+        idx = int(torch.searchsorted(prediction_timedelta_hours, target, right = False).item())
+        if idx <= 0:
+            return 0, 0, torch.zeros((), device = prediction_timedelta_hours.device, dtype = prediction_timedelta_hours.dtype)
+        if idx >= prediction_timedelta_hours.numel():
+            last = prediction_timedelta_hours.numel() - 1
+            return last, last, torch.zeros((), device = prediction_timedelta_hours.device, dtype = prediction_timedelta_hours.dtype)
+        if torch.isclose(prediction_timedelta_hours[idx], target):
+            return idx, idx, torch.zeros((), device = prediction_timedelta_hours.device, dtype = prediction_timedelta_hours.dtype)
+
+        lower_idx = idx - 1
+        upper_idx = idx
+        denom = prediction_timedelta_hours[upper_idx] - prediction_timedelta_hours[lower_idx]
+        if torch.isclose(denom, torch.zeros_like(denom)):
+            return lower_idx, upper_idx, torch.zeros_like(denom)
+        weight = (target - prediction_timedelta_hours[lower_idx]) / denom
+        return lower_idx, upper_idx, weight
+
+    def _select_from_prediction_timedelta(
+        self,
+        prediction_timedelta_hours: torch.Tensor,
+        tensor: torch.Tensor,
+        target_prediction_timedelta_hours: float,
+    ) -> torch.Tensor:
+        if self.time_interp_mode == "nearest" or self.time_interp_mode == "exact":
+            diffs = torch.abs(prediction_timedelta_hours - target_prediction_timedelta_hours)
+            nearest_idx = torch.argmin(diffs).item()
+            return tensor[nearest_idx]
+
+        lower_idx, upper_idx, weight = self._prediction_timedelta_bracketing_indices(
+            prediction_timedelta_hours,
+            target_prediction_timedelta_hours,
+        )
+        if lower_idx == upper_idx:
+            return tensor[lower_idx]
+        return tensor[lower_idx] + (tensor[upper_idx] - tensor[lower_idx]) * weight
+
+    def _select_boundary_from_source(
+        self,
+        source: dict,
+        base_time: pd.Timestamp,
+        target_time: pd.Timestamp,
+    ) -> dict:
+        base_time = pd.Timestamp(base_time)
+        target_time = pd.Timestamp(target_time)
+        target_prediction_timedelta_hours = float((target_time - base_time) / pd.Timedelta(hours = 1))
+        prediction_timedelta_hours = source["prediction_timedelta_hours"]
+
+        # Exact mode check
+        if self.time_interp_mode == "exact":
+            diffs = torch.abs(prediction_timedelta_hours - target_prediction_timedelta_hours)
+            min_diff = torch.min(diffs).item()
+            if min_diff > 1e-4:
+                return None
+
+        result = {"surf_vars": {}, "atmos_vars": {}}
+
+        for surface_var in self.surface_variables:
+            mapped_name = self.map_var_name_for_Aurora(surface_var)
+            result["surf_vars"][mapped_name] = self._select_from_prediction_timedelta(
+                prediction_timedelta_hours,
+                source["surf_vars"][mapped_name],
+                target_prediction_timedelta_hours,
+            )
+
+        for upper_var in self.upper_variables:
+            result["atmos_vars"][upper_var] = self._select_from_prediction_timedelta(
+                prediction_timedelta_hours,
+                source["atmos_vars"][upper_var],
+                target_prediction_timedelta_hours,
+            )
+
+        return result
+
+    def get_boundary_at_time_from_source(
+        self,
+        source: dict,
+        base_time: pd.Timestamp,
+        target_time: pd.Timestamp,
+    ) -> dict:
+        return self._select_boundary_from_source(source, base_time, target_time)
+
     def get_boundary_at_time(
         self,
         base_time: pd.Timestamp,
@@ -329,55 +450,14 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
     ) -> dict:
         base_time = pd.Timestamp(base_time)
         target_time = pd.Timestamp(target_time)
-        if self.use_cache:
-            source = self._cache[base_time]
-            result = {"surf_vars": {}, "atmos_vars": {}}
-            time_values = source["time_values"]
-
-            for surface_var in self.surface_variables:
-                mapped_name = self.map_var_name_for_Aurora(surface_var)
-                val = self._select_from_source(
-                    time_values,
-                    source["surf_vars"][mapped_name],
-                    target_time,
-                )
-                if val is None:
-                    return None
-                result["surf_vars"][mapped_name] = val
-
-            for upper_var in self.upper_variables:
-                val = self._select_from_source(
-                    time_values,
-                    source["atmos_vars"][upper_var],
-                    target_time,
-                )
-                if val is None:
-                    return None
-                result["atmos_vars"][upper_var] = val
-            return result
-
-        upper_path, surface_path = self._dt_to_path(base_time)
-
-        result = {"surf_vars": {}, "atmos_vars": {}}
-
-        with xr.open_dataset(upper_path, decode_timedelta = True) as upper_nc, xr.open_dataset(surface_path, decode_timedelta = True) as surface_nc:
-            upper_nc.load()
-            surface_nc.load()
-
-            for surface_var in self.surface_variables:
-                mapped_name = self.map_var_name_for_Aurora(surface_var)
-                data = self._select_data_array_at_time(surface_nc, mapped_name, target_time)
-                if data is None:
-                    return None
-                result["surf_vars"][mapped_name] = data
-
-            for upper_var in self.upper_variables:
-                data = self._select_data_array_at_time(upper_nc, upper_var, target_time)
-                if data is None:
-                    return None
-                result["atmos_vars"][upper_var] = data
-
-        return result
+        # Historical target times (before the base cycle) come from the previous forecast cycle,
+        # matching the era5 boundary path.
+        if target_time < base_time:
+            effective_base_time = base_time - pd.Timedelta(hours = self.forecast_cycle_hours)
+        else:
+            effective_base_time = base_time
+        source = self.get_boundary_source(effective_base_time)
+        return self.get_boundary_at_time_from_source(source, effective_base_time, target_time)
 
     def __getitem__(self, index: int) -> dict:
         date_hour = self.time_axis[index]
@@ -444,6 +524,10 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
 
 
 class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
+    # era5 files carry a prediction_timedelta forecast per cycle; served via the pipeline's
+    # forecast-source fast path.
+    uses_forecast_source = True
+
     def __init__(
         self,
         boundary_root_dir: str,
@@ -1027,6 +1111,11 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
 
         return result
 class BoundaryConditionDataset_GroundTruth(BoundaryConditionDataset_Aurora):
+    # Ground-truth analysis is exactly time-aligned (no forecast lead time); its source carries only
+    # absolute time_values, so it stays on the generic absolute-time pipeline path, not the
+    # prediction_timedelta forecast-source fast path.
+    uses_forecast_source = False
+
     def _dt_to_path(self, date_hour: pd.Timestamp) -> tuple[str, str]:
         dir_path = Path(self.boundary_root_dir) / date_hour.strftime(r"%Y/%Y%m/%Y%m%d")
         name = date_hour.strftime(r"%Y%m%d%H")

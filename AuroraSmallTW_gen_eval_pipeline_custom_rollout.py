@@ -46,12 +46,6 @@ def parse_args():
     parser.add_argument('--boundary_root_dir', type = str, default = None)
     parser.add_argument('--boundary_width', type = int, default = 0)
     parser.add_argument(
-        '--boundary_mode',
-        type = str,
-        default = "inject-inside",
-        choices = ["inject-inside", "pad-outside"],
-    )
-    parser.add_argument(
         "--boundary_prediction_timedeltas",
         type = int,
         nargs = "+",
@@ -63,12 +57,6 @@ def parse_args():
         default = "aurora",
         choices = ["aurora", "era5", "ground_truth"],
         help = "Select boundary dataset source format.",
-    )
-    parser.add_argument(
-        "--boundary_pooling",
-        type = str,
-        default = "no",
-        choices = ["no", "yes"],
     )
     parser.add_argument(
         "--boundary_smooth_mode",
@@ -110,8 +98,7 @@ def parse_args():
         choices = [0.25, 0.5, 1.5],
         help = "Boundary source resolution. 0.25=native baseline; 0.5=pool the 0.25deg source by "
                "2 on the fly; 1.5=native low-res dir (point --boundary_root_dir at "
-               "era5_tw_forecast_1.5deg). Only used for --boundary_source era5. Do NOT combine "
-               "0.5 with --boundary_pooling yes (double pooling).",
+               "era5_tw_forecast_1.5deg). Only used for --boundary_source era5.",
     )
     parser.add_argument(
         "--boundary_lowres_apply_mode",
@@ -444,7 +431,6 @@ def create_boundary_dataset(args, target_latitude = None, target_longitude = Non
             longitude = args.longitude,
             boundary_width = boundary_ds_width,
             prediction_timedeltas = prediction_timedeltas,
-            enable_pooling = (args.boundary_pooling == "yes"),
             use_cache = args.boundary_use_cache,
             time_interp_mode = internal_time_interp_mode,
             target_latitude = target_latitude,
@@ -464,7 +450,6 @@ def create_boundary_dataset(args, target_latitude = None, target_longitude = Non
             longitude = args.longitude,
             boundary_width = boundary_ds_width,
             prediction_timedeltas = prediction_timedeltas,
-            enable_pooling = (args.boundary_pooling == "yes"),
             use_cache = args.boundary_use_cache,
             time_interp_mode = internal_time_interp_mode,
         )
@@ -479,7 +464,6 @@ def create_boundary_dataset(args, target_latitude = None, target_longitude = Non
         longitude = args.longitude,
         boundary_width = boundary_ds_width,
         prediction_timedeltas = prediction_timedeltas,
-        enable_pooling = (args.boundary_pooling == "yes"),
         use_cache = args.boundary_use_cache,
         time_interp_mode = internal_time_interp_mode,
     )
@@ -1056,7 +1040,9 @@ def evaluate(
 
     boundary_enabled = boundary_dataset is not None and args.boundary_width > 0
     gpu_boundary_cache = {}
-    boundary_is_era5 = isinstance(boundary_dataset, BoundaryConditionDataset_ERA5)
+    # Both era5 and aurora expose a per-cycle forecast source (prediction_timedelta indexing +
+    # get_boundary_at_time_from_source), so they share the source-cache fast path; ground_truth does not.
+    boundary_uses_forecast_source = getattr(boundary_dataset, "uses_forecast_source", False)
 
     if boundary_enabled:
         boundary_latitudes, boundary_longitude = boundary_dataset.get_latitude_longitude()
@@ -1145,7 +1131,7 @@ def evaluate(
                 _input_tw = getattr(args, 'input_time_window', 1)
                 _ts_hours = getattr(args, 'timestep_hours', 6)
 
-                if boundary_is_era5:
+                if boundary_uses_forecast_source:
                     source_cache = gpu_boundary_cache if args.gpu_cache else {}
                     hist_cycle = getattr(boundary_dataset, "forecast_cycle_hours", 12)
                     for base_time in set(base_times):

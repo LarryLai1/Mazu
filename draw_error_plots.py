@@ -269,7 +269,7 @@ def main():
             2,
             4,
             figsize=(args.width * 3.0, args.height * 2.0),
-            sharex=True,
+            sharex=False,
             sharey=False,
         )
         axes_flat = axes.flatten()
@@ -391,7 +391,7 @@ def main():
             3,
             3,
             figsize=(args.width * 3.0, args.height * 3.0),
-            sharex=True,
+            sharex=False,
             sharey=False,
         )
         axes_flat = axes.flatten()

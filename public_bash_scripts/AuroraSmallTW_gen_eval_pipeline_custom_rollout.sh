@@ -5,11 +5,9 @@ set -eo pipefail
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 usage() {
-    echo "Usage: $0 [--gpus GPU_IDS] [--boundary_width N] [--boundary_mode MODE] [--pred true|false]" >&2
+    echo "Usage: $0 [--gpus GPU_IDS] [--boundary_width N] [--pred true|false]" >&2
     echo "  --gpus GPU_IDS           CUDA_VISIBLE_DEVICES value (default: 3,4,5)" >&2
     echo "  --boundary_width N       Boundary width (default: 2)" >&2
-    echo "  --boundary_mode MODE     Boundary mode (default: inject-inside)" >&2
-    echo "  --boundary_pooling MODE  Boundary pooling then reshape (default: no)" >&2
     echo "  --boundary_resolution R  Boundary resolution: 0.25|0.5|1.5 (default: 0.25)" >&2
     echo "  --boundary_lowres_apply_mode M  direct|interp (default: interp)" >&2
     echo "  --pred VALUE             Enable prediction mode (true/false, default: false)" >&2
@@ -17,9 +15,6 @@ usage() {
 
 CUDA_VISIBLE_DEVICES_VALUE="0,1"
 boundary_width=2
-boundary_mode="inject-inside"
-# boundary_pooling="yes"
-boundary_pooling="no"
 boundary_smooth_mode="no"
 boundary_smooth_width_adjustment=0
 boundary_time_interp_mode="interpolation"
@@ -40,14 +35,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --boundary_width)
             boundary_width="$2"
-            shift 2
-            ;;
-        --boundary_mode)
-            boundary_mode="$2"
-            shift 2
-            ;;
-        --boundary_pooling)
-            boundary_pooling="$2"
             shift 2
             ;;
         --boundary_smooth_mode)
@@ -118,10 +105,11 @@ era5_boundary_root_15="/tmp3/b12902101/era5_tw_forecast_1.5deg"
 ground_truth_root="/tmp3/yunye0121/era5_tw"
 
 # boundary_source="ground_truth"
-boundary_source="era5"
+# boundary_source="era5"
+boundary_source="aurora"
 
 
-OUTPUT_FOLDER_NAME="${output_root}/${boundary_source}_boundary${boundary_width}_${boundary_mode}_${boundary_smooth_mode}_${boundary_time_interp_mode}_${replace_boundary_position}_res${boundary_resolution}_${boundary_lowres_apply_mode}"
+OUTPUT_FOLDER_NAME="${output_root}/${boundary_source}_boundary${boundary_width}_${boundary_smooth_mode}_${boundary_time_interp_mode}_${replace_boundary_position}_res${boundary_resolution}_${boundary_lowres_apply_mode}"
 
 EXPERIMENT_ID=$(basename "$(dirname "$(dirname "$MODEL_CKPT_FOLDER")")")
 CKPT_NAME=$(basename "$MODEL_CKPT_FOLDER")
@@ -166,11 +154,9 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --longitude 100 144.75 \
     --lead_time 1 \
     --input_time_window 2 \
-    --rollout_step 240 \
+    --rollout_step 72 \
     --timestep_hours 1 \
     --boundary_width ${boundary_width} \
-    --boundary_mode ${boundary_mode} \
-    --boundary_pooling ${boundary_pooling} \
     --boundary_source ${boundary_source} \
     --boundary_smooth_mode "${boundary_smooth_mode}" \
     --boundary_time_interp_mode "${boundary_time_interp_mode}" \

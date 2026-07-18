@@ -45,10 +45,23 @@ def main():
     parser.add_argument('--data_root_dir', type=str, default='/tmp3/yunye0121/era5_tw', help='Ground truth root directory')
     parser.add_argument('--output_dir', type=str, default='wavenumber_plots', help='Output directory')
     parser.add_argument('--time_interp_mode', type=str, default='nearest', choices=['exact', 'nearest', 'interpolated'])
+    parser.add_argument('--boundary_resolutions', type=float, nargs='+', default=None, choices=[0.25, 0.5, 1.5],
+                        help='Per-entry ERA5 boundary resolution, parallel to --preds_dirs (defaults to 0.25 '
+                             'everywhere). 0.5 pools the 0.25deg source by 2 on the fly; 1.5 needs the entry to '
+                             'point at era5_tw_forecast_1.5deg. Ignored for entries holding model predictions.')
+    parser.add_argument('--boundary_lowres_apply_modes', type=str, nargs='+', default=None, choices=['direct', 'interp'],
+                        help='Per-entry apply mode, parallel to --preds_dirs (defaults to interp everywhere): '
+                             'direct=block/nearest footprint; interp=bilinear/linear. Ignored at resolution 0.25.')
     args = parser.parse_args()
 
     if len(args.preds_dirs) != len(args.labels) or len(args.preds_dirs) != len(args.init_times):
         raise ValueError("Lengths of preds_dirs, labels, and init_times must be equal.")
+
+    num_entries = len(args.preds_dirs)
+    boundary_resolutions = args.boundary_resolutions if args.boundary_resolutions is not None else [0.25] * num_entries
+    boundary_apply_modes = args.boundary_lowres_apply_modes if args.boundary_lowres_apply_modes is not None else ['interp'] * num_entries
+    if len(boundary_resolutions) != num_entries or len(boundary_apply_modes) != num_entries:
+        raise ValueError("Lengths of boundary_resolutions and boundary_lowres_apply_modes must match preds_dirs.")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -59,9 +72,10 @@ def main():
     else:
         upper_vars = [args.var_name]
 
-    # Convert initial times to DatetimeIndex
+    # Convert initial times to DatetimeIndexss
     init_times_parsed = [pd.Timestamp(t) for t in args.init_times]
-    lead_times = list(range(0, 73, 6))
+    lead_times = list(range(0, 241, 12))
+    # lead_times = list(range(0, 73, 6))
 
     # Determine time window range for Ground Truth
     min_init = min(init_times_parsed)
@@ -96,7 +110,9 @@ def main():
 
     # Setup each predictions directory's loader configuration
     loaders_config = []
-    for preds_dir, init_time, label in zip(args.preds_dirs, init_times_parsed, args.labels):
+    for preds_dir, init_time, label, boundary_resolution, apply_mode in zip(
+        args.preds_dirs, init_times_parsed, args.labels, boundary_resolutions, boundary_apply_modes
+    ):
         # Format Auto-detection
         standard_file_found = False
         for lt in lead_times:
@@ -129,6 +145,12 @@ def main():
                 forecast_cycle_hours=12,
                 time_interp_mode=args.time_interp_mode,
                 use_cache=False,
+                # The spectrum is compared against the ground truth on lat_arr/lon_arr, so that is
+                # the grid a low-res boundary has to be brought back onto.
+                target_latitude=lat_arr,
+                target_longitude=lon_arr,
+                boundary_resolution=boundary_resolution,
+                lowres_apply_mode=apply_mode,
             )
             try:
                 bd_source = ds_bd.get_boundary_source(era5_init_time)
@@ -152,8 +174,12 @@ def main():
     fig, axes = plt.subplots(rows, cols, figsize=(20, 4.5 * rows))
     axes = axes.flatten()
 
+    fig_ratio, axes_ratio = plt.subplots(rows, cols, figsize=(20, 4.5 * rows))
+    axes_ratio = axes_ratio.flatten()
+
     for k in range(num_plots, len(axes)):
         axes[k].set_visible(False)
+        axes_ratio[k].set_visible(False)
 
     for j, lt in enumerate(lead_times):
         ax = axes[j]
@@ -161,6 +187,15 @@ def main():
         ax.set_xlabel("Zonal Wavenumber ($k_x$, cycles/deg)", fontsize=10)
         ax.set_ylabel("Power Spectrum", fontsize=10)
         ax.grid(True, which="both", alpha=0.3)
+
+        ax_ratio = axes_ratio[j]
+        ax_ratio.set_title(f"+{lt}hr", fontsize=14)
+        ax_ratio.set_xlabel("Zonal Wavenumber ($k_x$, cycles/deg)", fontsize=10)
+        ax_ratio.set_ylabel("Prediction / Ground Truth", fontsize=10)
+        ax_ratio.grid(True, which="both", alpha=0.3)
+        ax_ratio.axhline(1.0, color='black', linestyle='--', linewidth=1.5)
+        ax_ratio.set_xscale("log")
+        ax_ratio.set_ylim(0, 5)
 
         # Plot Ground Truth (loaded once per target time across all comparisons)
         gt_loaded = False
@@ -195,6 +230,8 @@ def main():
                 if sfc_nc_gt is not None:
                     sfc_nc_gt.close()
         
+        k_gt = None
+        power_gt = None
         if gt_loaded and gt_val is not None:
             k_gt, power_gt = compute_wavenumber_spectrum(gt_val, lat_arr, lon_arr, crop_width=args.crop_width)
             ax.loglog(k_gt, power_gt, color='black', linestyle='--', linewidth=2.5, label='Ground Truth')
@@ -248,17 +285,37 @@ def main():
 
             if has_pred and pred_val is not None:
                 k_pred, power_pred = compute_wavenumber_spectrum(pred_val, lat_arr, lon_arr, crop_width=args.crop_width)
-                ax.loglog(k_pred, power_pred, alpha=0.8, linewidth=1.5, label=label)
+                ax.loglog(k_pred, power_pred, alpha=0.8, linewidth=1, label=label)
+
+                if power_gt is not None:
+                    # The prediction may sit on a different wavenumber grid, so bring it onto the
+                    # ground truth axis before dividing.
+                    power_pred_on_gt = np.interp(k_gt, k_pred, power_pred, left=np.nan, right=np.nan)
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        ratio = power_pred_on_gt / power_gt
+                    ax_ratio.plot(k_gt, ratio, alpha=0.8, linewidth=1, label=label)
 
         ax.legend(fontsize=8, loc='lower left')
+        ax_ratio.legend(fontsize=8, loc='lower left')
 
-    plt.suptitle(f"Zonal Wavenumber Spectrum Comparison ({args.var_name}) - Crop Width: {args.crop_width}px", fontsize=20)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    fig.suptitle(f"Zonal Wavenumber Spectrum Comparison ({args.var_name}) - Crop Width: {args.crop_width}px", fontsize=20)
+    fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     
     output_path = os.path.join(args.output_dir, f"wavenumber_comparison_{args.var_name}.png")
-    plt.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=150)
     plt.close(fig)
     print(f"Comparison plot saved to {output_path}")
+
+    fig_ratio.suptitle(
+        f"Zonal Wavenumber Spectrum Ratio to Ground Truth ({args.var_name}) - Crop Width: {args.crop_width}px",
+        fontsize=20,
+    )
+    fig_ratio.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+    ratio_output_path = os.path.join(args.output_dir, f"wavenumber_ratio_{args.var_name}.png")
+    fig_ratio.savefig(ratio_output_path, dpi=150)
+    plt.close(fig_ratio)
+    print(f"Ratio plot saved to {ratio_output_path}")
 
 if __name__ == '__main__':
     main()

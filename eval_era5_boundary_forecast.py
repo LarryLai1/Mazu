@@ -20,7 +20,7 @@ import xarray as xr
 # Add current directory to path just in case
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
-from datasets.BoundaryConditionDataset import BoundaryConditionDataset_ERA5
+from datasets.BoundaryConditionDataset import BoundaryConditionDataset_Aurora, BoundaryConditionDataset_ERA5
 from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora
 from utils.metrics import MSEAggregator, MAEAggregator
 
@@ -40,6 +40,9 @@ def set_seed(seed):
 def parse_args():
     parser = argparse.ArgumentParser(description="Calculate MSE between ERA5 boundary dataset forecast and ground truth.")
     parser.add_argument('--boundary_root_dir', type=str, required=True, help="Directory containing ERA5 boundary forecasts.")
+    parser.add_argument('--boundary_source', type=str, default="era5", choices=["era5", "aurora"],
+                        help="Which boundary forecast to score. era5=ERA5/HRES forecast archive; "
+                             "aurora=Aurora global forecast outputs (native 0.25deg only).")
     parser.add_argument('--data_root_dir', type=str, required=True, help="Directory containing ground truth (ERA5 TW).")
     parser.add_argument('--start_date_hour', type=str, required=True, help="Start datetime, e.g., '2020-08-01 00:00:00'.")
     parser.add_argument('--end_date_hour', type=str, required=True, help="End datetime, e.g., '2020-09-01 00:00:00'.")
@@ -49,6 +52,14 @@ def parse_args():
     parser.add_argument('--latitude', type=float, nargs=2, default=[39.75, 5])
     parser.add_argument('--longitude', type=float, nargs=2, default=[100, 144.75])
     parser.add_argument('--forecast_cycle_hours', type=int, default=12, help="Forecast cycle in hours (default: 12).")
+    parser.add_argument('--boundary_resolution', type=float, default=0.25, choices=[0.25, 0.5, 1.5],
+                        help="Boundary source resolution. 0.25=native baseline; 0.5=pool the 0.25deg source by "
+                             "2 on the fly; 1.5=native low-res dir (point --boundary_root_dir at "
+                             "era5_tw_forecast_1.5deg).")
+    parser.add_argument('--boundary_lowres_apply_mode', type=str, default="interp", choices=["direct", "interp"],
+                        help="How a low-res boundary is mapped back onto the 0.25deg ground-truth grid: "
+                             "direct=block/nearest footprint; interp=bilinear/linear. "
+                             "Ignored at --boundary_resolution 0.25.")
     parser.add_argument('--csv_output_folder', type=str, required=True, help="Folder to save the output CSV.")
     parser.add_argument('--prediction_timedelta_hours', type=int, nargs='+', default=None,
                         help="List of forecast lead times in hours. If not specified, all available in files will be used.")
@@ -88,7 +99,23 @@ def _resolve_mp_world_size(args):
 
 def create_datasets(args, verbose=True):
     prediction_timedelta_hours = args.prediction_timedelta_hours
-    if prediction_timedelta_hours is None:
+    if prediction_timedelta_hours is None and args.boundary_source == "aurora":
+        # Aurora files carry an absolute `time` trajectory instead of a prediction_timedelta
+        # coordinate, so the lead times are the offsets from the cycle's init time.
+        try:
+            base_dt = pd.Timestamp(args.start_date_hour).floor(f"{args.forecast_cycle_hours}h")
+            name = base_dt.strftime(r"%Y%m%d_%H")
+            candidate_path = Path(args.boundary_root_dir) / base_dt.strftime(r"%Y/%Y%m/%Y%m%d") / f"{name}_upper.nc"
+            if not candidate_path.exists():
+                candidate_path = Path(args.boundary_root_dir) / base_dt.strftime(r"%Y%m%d") / f"{name}_upper.nc"
+            if candidate_path.exists():
+                with xr.open_dataset(candidate_path, decode_timedelta=True) as ds:
+                    times = pd.DatetimeIndex(pd.to_datetime(ds["time"].values))
+                    lead_hours = sorted({int(round(x)) for x in (times - base_dt) / pd.Timedelta(hours=1)})
+                    prediction_timedelta_hours = [x for x in lead_hours if 0 <= x <= 240]
+        except Exception as e:
+            print(f"Failed to auto-detect prediction_timedelta: {e}")
+    elif prediction_timedelta_hours is None:
         try:
             start_dt = pd.Timestamp(args.start_date_hour)
             date = start_dt.normalize()
@@ -113,22 +140,9 @@ def create_datasets(args, verbose=True):
 
     if verbose:
         print(f"Using prediction_timedelta_hours: {prediction_timedelta_hours}")
-
-    ds_bd = BoundaryConditionDataset_ERA5(
-        boundary_root_dir=args.boundary_root_dir,
-        start_date_hour=args.start_date_hour,
-        end_date_hour=args.end_date_hour,
-        upper_variables=args.upper_variables,
-        surface_variables=args.surface_variables,
-        levels=args.levels,
-        latitude=args.latitude,
-        longitude=args.longitude,
-        boundary_width=0,
-        prediction_timedeltas=prediction_timedelta_hours,
-        forecast_cycle_hours=args.forecast_cycle_hours,
-        time_interp_mode=args.time_interp_mode,
-        use_cache=False,
-    )
+        print(f"Boundary source: {args.boundary_source}")
+        if args.boundary_source == "era5":
+            print(f"Boundary resolution: {args.boundary_resolution} (apply mode: {args.boundary_lowres_apply_mode})")
 
     ds_gt = ERA5TWDatasetforAurora(
         data_root_dir=args.data_root_dir,
@@ -145,7 +159,51 @@ def create_datasets(args, verbose=True):
         rollout_step=1,
         sample_stride_hours=1,
     )
-    
+
+    # The forecast is scored against the ground truth, so the ground-truth 0.25deg grid is the
+    # grid a low-res boundary has to be brought back onto (mirrors the model grid used at rollout).
+    target_latitude, target_longitude = ds_gt.get_latitude_longitude()
+
+    if args.boundary_source == "aurora":
+        # The Aurora outputs are already on the 0.25deg grid, so there is no low-res
+        # resolution/apply-mode handling to do here.
+        ds_bd = BoundaryConditionDataset_Aurora(
+            boundary_root_dir=args.boundary_root_dir,
+            start_date_hour=args.start_date_hour,
+            end_date_hour=args.end_date_hour,
+            upper_variables=args.upper_variables,
+            surface_variables=args.surface_variables,
+            levels=args.levels,
+            latitude=args.latitude,
+            longitude=args.longitude,
+            boundary_width=0,
+            prediction_timedeltas=prediction_timedelta_hours,
+            forecast_cycle_hours=args.forecast_cycle_hours,
+            time_interp_mode=args.time_interp_mode,
+            use_cache=False,
+        )
+        return ds_bd, ds_gt, prediction_timedelta_hours
+
+    ds_bd = BoundaryConditionDataset_ERA5(
+        boundary_root_dir=args.boundary_root_dir,
+        start_date_hour=args.start_date_hour,
+        end_date_hour=args.end_date_hour,
+        upper_variables=args.upper_variables,
+        surface_variables=args.surface_variables,
+        levels=args.levels,
+        latitude=args.latitude,
+        longitude=args.longitude,
+        boundary_width=0,
+        prediction_timedeltas=prediction_timedelta_hours,
+        forecast_cycle_hours=args.forecast_cycle_hours,
+        time_interp_mode=args.time_interp_mode,
+        use_cache=False,
+        target_latitude=target_latitude,
+        target_longitude=target_longitude,
+        boundary_resolution=args.boundary_resolution,
+        lowres_apply_mode=args.boundary_lowres_apply_mode,
+    )
+
     return ds_bd, ds_gt, prediction_timedelta_hours
 
 def _build_metric_lists(args, prediction_timedelta_hours):

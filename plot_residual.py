@@ -20,6 +20,13 @@ def main():
     parser.add_argument('--plot_mode', type=str, choices=['residual', 'prediction'], default='residual', help='Plot residual or pure prediction')
     parser.add_argument('--init_time', type=str, default='2020-07-01 01:00:00', help='Plotting initialization time (format: YYYY-MM-DD HH:MM:SS)')
     parser.add_argument('--time_interp_mode', type=str, default='nearest', choices=['interpolation', 'nearest', 'exact'], help='Time interpolation mode for boundary forecast')
+    parser.add_argument('--boundary_resolution', type=float, default=0.25, choices=[0.25, 0.5, 1.5],
+                        help='Resolution of the ERA5 boundary forecast. 0.25=native baseline; 0.5=pool the '
+                             '0.25deg source by 2 on the fly; 1.5=native low-res dir (point --preds_dir at '
+                             'era5_tw_forecast_1.5deg). Only used when --preds_dir holds an ERA5 forecast.')
+    parser.add_argument('--boundary_lowres_apply_mode', type=str, default='interp', choices=['direct', 'interp'],
+                        help='How a low-res boundary is mapped onto the 0.25deg grid: direct=block/nearest '
+                             'footprint; interp=bilinear/linear. Ignored at --boundary_resolution 0.25.')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -108,6 +115,12 @@ def main():
             forecast_cycle_hours=12,
             time_interp_mode=args.time_interp_mode,
             use_cache=False,
+            # The forecast is plotted against the ground truth on lat_arr/lon_arr, so that is the
+            # grid a low-res boundary has to be brought back onto.
+            target_latitude=lat_arr,
+            target_longitude=lon_arr,
+            boundary_resolution=args.boundary_resolution,
+            lowres_apply_mode=args.boundary_lowres_apply_mode,
         )
         try:
             bd_source = ds_bd.get_boundary_source(era5_init_time)
@@ -212,7 +225,13 @@ def main():
             axes[j].set_visible(False)
             
     plot_title = "Residuals" if args.plot_mode == 'residual' else "Predictions"
-    plt.suptitle(f"{plot_title} for Init: {init_time.strftime('%Y-%m-%d %H:00')} ({args.var_name})", fontsize=24)
+    # Tag the resolution so the per-resolution ERA5 figures are tellable apart.
+    res_tag = ""
+    if is_era5_forecast:
+        res_tag = f" @ {args.boundary_resolution}deg"
+        if args.boundary_resolution != 0.25:
+            res_tag += f" {args.boundary_lowres_apply_mode}"
+    plt.suptitle(f"{plot_title} for Init: {init_time.strftime('%Y-%m-%d %H:00')} ({args.var_name}){res_tag}", fontsize=24)
     plt.tight_layout(rect=[0, 0.03, 1, 0.98])
     
     prefix = "residual" if args.plot_mode == 'residual' else "prediction"
