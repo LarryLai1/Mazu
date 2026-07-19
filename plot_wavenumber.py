@@ -46,9 +46,9 @@ def main():
     parser.add_argument('--output_dir', type=str, default='wavenumber_plots', help='Output directory')
     parser.add_argument('--time_interp_mode', type=str, default='nearest', choices=['exact', 'nearest', 'interpolated'])
     parser.add_argument('--boundary_resolutions', type=float, nargs='+', default=None, choices=[0.25, 0.5, 1.5],
-                        help='Per-entry ERA5 boundary resolution, parallel to --preds_dirs (defaults to 0.25 '
+                        help='Per-entry HRES boundary resolution, parallel to --preds_dirs (defaults to 0.25 '
                              'everywhere). 0.5 pools the 0.25deg source by 2 on the fly; 1.5 needs the entry to '
-                             'point at era5_tw_forecast_1.5deg. Ignored for entries holding model predictions.')
+                             'point at hres_tw_forecast_1.5deg. Ignored for entries holding model predictions.')
     parser.add_argument('--boundary_lowres_apply_modes', type=str, nargs='+', default=None, choices=['direct', 'interp'],
                         help='Per-entry apply mode, parallel to --preds_dirs (defaults to interp everywhere): '
                              'direct=block/nearest footprint; interp=bilinear/linear. Ignored at resolution 0.25.')
@@ -122,19 +122,19 @@ def main():
                 standard_file_found = True
                 break
                 
-        is_era5_forecast = not standard_file_found
+        is_hres_forecast = not standard_file_found
         
         ds_bd = None
         bd_source = None
-        era5_init_time = None
+        hres_init_time = None
         
-        if is_era5_forecast:
-            from datasets.BoundaryConditionDataset import BoundaryConditionDataset_ERA5
-            era5_init_time = init_time.floor('12h')
-            ds_bd = BoundaryConditionDataset_ERA5(
+        if is_hres_forecast:
+            from datasets.BoundaryConditionDataset import BoundaryConditionDataset_HRES
+            hres_init_time = init_time.floor('12h')
+            ds_bd = BoundaryConditionDataset_HRES(
                 boundary_root_dir=preds_dir,
-                start_date_hour=era5_init_time,
-                end_date_hour=era5_init_time,
+                start_date_hour=hres_init_time,
+                end_date_hour=hres_init_time,
                 upper_variables=upper_vars,
                 surface_variables=surface_vars,
                 levels=[1000, 925, 850, 700, 500, 300, 150, 50],
@@ -153,7 +153,7 @@ def main():
                 lowres_apply_mode=apply_mode,
             )
             try:
-                bd_source = ds_bd.get_boundary_source(era5_init_time)
+                bd_source = ds_bd.get_boundary_source(hres_init_time)
             except Exception as e:
                 print(f"Failed to load boundary source for {label}: {e}")
                 
@@ -161,10 +161,10 @@ def main():
             'preds_dir': preds_dir,
             'init_time': init_time,
             'label': label,
-            'is_era5_forecast': is_era5_forecast,
+            'is_hres_forecast': is_hres_forecast,
             'ds_bd': ds_bd,
             'bd_source': bd_source,
-            'era5_init_time': era5_init_time
+            'hres_init_time': hres_init_time
         })
 
     # Prepare plotting subplots
@@ -241,18 +241,18 @@ def main():
             preds_dir = config['preds_dir']
             init_time = config['init_time']
             label = config['label']
-            is_era5_forecast = config['is_era5_forecast']
+            is_hres_forecast = config['is_hres_forecast']
             ds_bd = config['ds_bd']
             bd_source = config['bd_source']
-            era5_init_time = config['era5_init_time']
+            hres_init_time = config['hres_init_time']
             
             target_time = init_time + pd.Timedelta(hours=lt)
             pred_val = None
             has_pred = False
 
-            if is_era5_forecast and bd_source is not None:
+            if is_hres_forecast and bd_source is not None:
                 try:
-                    pred_dict = ds_bd.get_boundary_at_time_from_source(bd_source, era5_init_time, target_time)
+                    pred_dict = ds_bd.get_boundary_at_time_from_source(bd_source, hres_init_time, target_time)
                     if pred_dict is not None:
                         gt_var_name = ds_gt.map_var_name_for_Aurora(args.var_name)
                         if surface_vars:

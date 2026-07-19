@@ -2,7 +2,7 @@
 and low-res apply modes.
 
 For each (resolution, apply_mode) combination the boundary is loaded through
-BoundaryConditionDataset_ERA5, so the field shown is exactly what the rollout injects:
+BoundaryConditionDataset_HRES, so the field shown is exactly what the rollout injects:
 already coarsened and brought back onto the model's 0.25deg grid.
 
 Note: at --boundary_resolution 0.25 the transform is a no-op and the apply mode is
@@ -22,12 +22,12 @@ import numpy as np
 import pandas as pd
 
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
-from datasets.BoundaryConditionDataset import BoundaryConditionDataset_ERA5
+from datasets.BoundaryConditionDataset import BoundaryConditionDataset_HRES
 
 # 0.5deg is derived on the fly by pooling the 0.25deg source, so it reuses that root;
 # 1.5deg is a genuinely coarser dataset on disk.
-DEFAULT_ROOT_025 = "/tmp3/b12902101/era5_tw_forecast_0.25deg"
-DEFAULT_ROOT_15 = "/tmp3/b12902101/era5_tw_forecast_1.5deg"
+DEFAULT_ROOT_025 = "/tmp3/b12902101/hres_tw_forecast_0.25deg"
+DEFAULT_ROOT_15 = "/tmp3/b12902101/hres_tw_forecast_1.5deg"
 
 UPPER_ALL = ["u", "v", "t", "q", "z"]
 
@@ -54,7 +54,7 @@ def parse_args():
 def build_dataset(args, resolution, apply_mode, base_time, upper_vars, surface_vars,
                   target_latitude=None, target_longitude=None):
     root = args.boundary_root_15 if resolution == 1.5 else args.boundary_root_025
-    return BoundaryConditionDataset_ERA5(
+    return BoundaryConditionDataset_HRES(
         boundary_root_dir=root,
         start_date_hour=base_time,
         end_date_hour=base_time,

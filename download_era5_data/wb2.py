@@ -32,6 +32,9 @@ time = slice("2020-01-01T00:00:00.000000000", "2020-12-31T00:00:00.000000000")
 pred_time = slice(0, 240)
 levels = [1000, 925, 850, 700, 500, 300, 150, 50]
 
+# NOTE: this pulls ECMWF HRES forecasts, not ERA5 reanalysis. The boundary forecast archive
+# was originally misnamed "era5_tw_forecast_*"; it is now "hres_tw_forecast_*". ERA5 in this
+# project refers only to the ground truth under yunye0121/era5_tw (see download_era5.py).
 fs = gcsfs.GCSFileSystem(token='anon')
 # mapper = fs.get_mapper("gs://weatherbench2/datasets/hres/2016-2022-0012-240x121_equiangular_with_poles_conservative.zarr")
 mapper = fs.get_mapper("gs://weatherbench2/datasets/hres/2016-2022-0012-1440x721.zarr")
@@ -49,8 +52,8 @@ if missing_vars:
     print("Missing forecast vars:", missing_vars)
 ds = ds[existing_vars]
 
-# out_root = Path("/tmp3/b12902101/era5_tw_forecast_1.5deg")
-out_root = Path("/tmp3/b12902101/era5_tw_forecast_0.25deg")
+# out_root = Path("/tmp3/b12902101/hres_tw_forecast_1.5deg")
+out_root = Path("/tmp3/b12902101/hres_tw_forecast_0.25deg")
 out_root.mkdir(parents=True, exist_ok=True)
 
 def split_and_save_by_date(ds, out_root, time_values=None, limit=None):

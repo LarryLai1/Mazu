@@ -5,7 +5,7 @@ colors=("#FF0000" "#006000" "#00EC00" "#C07AB8" "#8600FF")
 
 use_baseline=false
 if [ "${use_baseline}" = true ]; then
-    csv_paths=("${root_dir}/era5_boundary0_no_nearest_backbone_res0.25_direct/${suffix}")
+    csv_paths=("${root_dir}/hres_boundary0_no_nearest_backbone_res0.25_direct/${suffix}")
     styles=("linestyle=-,linewidth=2")
     legend_names=("Baseline")
 else
@@ -16,8 +16,8 @@ fi
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 
-era5_boundary_root="/tmp3/b12902101/era5_tw_forecast_0.25deg"
-era5_boundary_root_15="/tmp3/b12902101/era5_tw_forecast_1.5deg"
+hres_boundary_root="/tmp3/b12902101/hres_tw_forecast_0.25deg"
+hres_boundary_root_15="/tmp3/b12902101/hres_tw_forecast_1.5deg"
 
 smooth="no"
 bd_position="backbone"
@@ -28,20 +28,20 @@ resols=(0.25 0.5 1.5)
 # lead time; this only trims the x-axis at draw time. Leave empty to plot all available hours.
 max_lead_hours="72"
 
-# ERA5 boundary forecast itself (no model), scored at each resolution in direct apply mode.
+# HRES boundary forecast itself (no model), scored at each resolution in direct apply mode.
 bd_apply_mode="direct"
 for index in 0; do
 # for index in "${!resols[@]}"; do
     resol="${resols[${index}]}"
     # The 1.5deg boundary lives in its own native low-res dataset.
-    boundary_root_dir="${era5_boundary_root}"
+    boundary_root_dir="${hres_boundary_root}"
     if [ "${resol}" = "1.5" ]; then
-        boundary_root_dir="${era5_boundary_root_15}"
+        boundary_root_dir="${hres_boundary_root_15}"
     fi
-    bd_out_dir="${root_dir}/era5_boundary_data_res${resol}_${bd_apply_mode}"
+    bd_out_dir="${root_dir}/hres_boundary_data_res${resol}_${bd_apply_mode}"
 
     if [ ! -f "${bd_out_dir}/MAE.csv" ]; then
-        python eval_era5_boundary_forecast.py \
+        python eval_hres_boundary_forecast.py \
             --boundary_root_dir "${boundary_root_dir}" \
             --data_root_dir "/tmp3/yunye0121/era5_tw" \
             --start_date_hour "2020-03-01 00:00:00" \
@@ -67,7 +67,7 @@ for index in "${!resols[@]}"; do
         if [ "${resol}" = 0.25 ] && [ "${apply_mode}" = "interp" ]; then
             continue
         fi
-        csv_paths+=("${var_dir}/era5_boundary8_${smooth}_${interp}_${bd_position}_res${resol}_${apply_mode}/${suffix}")
+        csv_paths+=("${var_dir}/hres_boundary8_${smooth}_${interp}_${bd_position}_res${resol}_${apply_mode}/${suffix}")
         legend_names+=("Boundary 8 ${interp} ${smooth} ${bd_position} ${resol} ${apply_mode}")
         # legend_names+=("Boundary 8 ${interp} ${smooth} ${bd_position}")
         if [ "${apply_mode}" == "interp" ]; then
@@ -86,7 +86,7 @@ styles+=("linestyle=-,linewidth=2,color=${colors[4]}")
 aurora_boundary_root="/tmp3/b12902101/earth2/outputs"
 aurora_bd_out_dir="${root_dir}/aurora_boundary_data_res0.25_direct"
 if [ ! -f "${aurora_bd_out_dir}/MAE.csv" ]; then
-    python eval_era5_boundary_forecast.py \
+    python eval_hres_boundary_forecast.py \
         --boundary_root_dir "${aurora_boundary_root}" \
         --boundary_source "aurora" \
         --data_root_dir "/tmp3/yunye0121/era5_tw" \

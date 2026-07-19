@@ -21,7 +21,7 @@ from aurora import Batch, Metadata
 # from utils.custom_rollout import rollout_with_gpu
 from aurora.model.aurora import AuroraSmall
 from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora, NETCDF_IO_LOCK
-from datasets.BoundaryConditionDataset import BoundaryConditionDataset_Aurora, BoundaryConditionDataset_ERA5, BoundaryConditionDataset_GroundTruth
+from datasets.BoundaryConditionDataset import BoundaryConditionDataset_Aurora, BoundaryConditionDataset_HRES, BoundaryConditionDataset_GroundTruth
 from utils.metrics import AuroraMAELoss, AuroraMSELoss
 from utils.metrics import prepare_each_lead_time_agg
 
@@ -55,7 +55,7 @@ def parse_args():
         "--boundary_source",
         type = str,
         default = "aurora",
-        choices = ["aurora", "era5", "ground_truth"],
+        choices = ["aurora", "hres", "ground_truth"],
         help = "Select boundary dataset source format.",
     )
     parser.add_argument(
@@ -98,7 +98,7 @@ def parse_args():
         choices = [0.25, 0.5, 1.5],
         help = "Boundary source resolution. 0.25=native baseline; 0.5=pool the 0.25deg source by "
                "2 on the fly; 1.5=native low-res dir (point --boundary_root_dir at "
-               "era5_tw_forecast_1.5deg). Only used for --boundary_source era5.",
+               "hres_tw_forecast_1.5deg). Only used for --boundary_source hres.",
     )
     parser.add_argument(
         "--boundary_lowres_apply_mode",
@@ -401,7 +401,7 @@ def create_boundary_dataset(args, target_latitude = None, target_longitude = Non
     boundary_ds_width = 0
     prediction_timedeltas = args.boundary_prediction_timedeltas
     if prediction_timedeltas is None:
-        if args.boundary_source == "era5":
+        if args.boundary_source == "hres":
             prediction_timedeltas = [0, 12]
         elif args.boundary_source == "ground_truth":
             prediction_timedeltas = [k * args.lead_time for k in range(args.rollout_step + 1)]
@@ -419,8 +419,8 @@ def create_boundary_dataset(args, target_latitude = None, target_longitude = Non
     rollout_duration = pd.Timedelta(hours = (args.input_time_window - 1 + args.rollout_step) * args.lead_time)
     dataset_end_date_hour = end_dt + rollout_duration
 
-    if args.boundary_source == "era5":
-        return BoundaryConditionDataset_ERA5(
+    if args.boundary_source == "hres":
+        return BoundaryConditionDataset_HRES(
             boundary_root_dir = args.boundary_root_dir,
             start_date_hour = args.start_date_hour,
             end_date_hour = dataset_end_date_hour,
@@ -541,7 +541,7 @@ def _get_boundary_source_on_device(
     gpu_cache[base_time] = gpu_source
     return gpu_source
 
-def _build_boundary_batch_from_era5_source(
+def _build_boundary_batch_from_hres_source(
     boundary_dataset,
     source_cache,
     base_times,
@@ -1040,7 +1040,7 @@ def evaluate(
 
     boundary_enabled = boundary_dataset is not None and args.boundary_width > 0
     gpu_boundary_cache = {}
-    # Both era5 and aurora expose a per-cycle forecast source (prediction_timedelta indexing +
+    # Both hres and aurora expose a per-cycle forecast source (prediction_timedelta indexing +
     # get_boundary_at_time_from_source), so they share the source-cache fast path; ground_truth does not.
     boundary_uses_forecast_source = getattr(boundary_dataset, "uses_forecast_source", False)
 
@@ -1156,7 +1156,7 @@ def evaluate(
                                 pd.Timestamp(d) + pd.Timedelta(hours=offset_hours)
                                 for d in dates
                             )
-                            b_single = _build_boundary_batch_from_era5_source(
+                            b_single = _build_boundary_batch_from_hres_source(
                                 boundary_dataset,
                                 source_cache,
                                 base_times,

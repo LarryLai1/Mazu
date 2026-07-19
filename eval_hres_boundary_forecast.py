@@ -20,7 +20,7 @@ import xarray as xr
 # Add current directory to path just in case
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
-from datasets.BoundaryConditionDataset import BoundaryConditionDataset_Aurora, BoundaryConditionDataset_ERA5
+from datasets.BoundaryConditionDataset import BoundaryConditionDataset_Aurora, BoundaryConditionDataset_HRES
 from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora
 from utils.metrics import MSEAggregator, MAEAggregator
 
@@ -38,10 +38,10 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Calculate MSE between ERA5 boundary dataset forecast and ground truth.")
-    parser.add_argument('--boundary_root_dir', type=str, required=True, help="Directory containing ERA5 boundary forecasts.")
-    parser.add_argument('--boundary_source', type=str, default="era5", choices=["era5", "aurora"],
-                        help="Which boundary forecast to score. era5=ERA5/HRES forecast archive; "
+    parser = argparse.ArgumentParser(description="Calculate MSE between HRES boundary dataset forecast and ground truth.")
+    parser.add_argument('--boundary_root_dir', type=str, required=True, help="Directory containing HRES boundary forecasts.")
+    parser.add_argument('--boundary_source', type=str, default="hres", choices=["hres", "aurora"],
+                        help="Which boundary forecast to score. hres=ECMWF HRES forecast archive; "
                              "aurora=Aurora global forecast outputs (native 0.25deg only).")
     parser.add_argument('--data_root_dir', type=str, required=True, help="Directory containing ground truth (ERA5 TW).")
     parser.add_argument('--start_date_hour', type=str, required=True, help="Start datetime, e.g., '2020-08-01 00:00:00'.")
@@ -55,7 +55,7 @@ def parse_args():
     parser.add_argument('--boundary_resolution', type=float, default=0.25, choices=[0.25, 0.5, 1.5],
                         help="Boundary source resolution. 0.25=native baseline; 0.5=pool the 0.25deg source by "
                              "2 on the fly; 1.5=native low-res dir (point --boundary_root_dir at "
-                             "era5_tw_forecast_1.5deg).")
+                             "hres_tw_forecast_1.5deg).")
     parser.add_argument('--boundary_lowres_apply_mode', type=str, default="interp", choices=["direct", "interp"],
                         help="How a low-res boundary is mapped back onto the 0.25deg ground-truth grid: "
                              "direct=block/nearest footprint; interp=bilinear/linear. "
@@ -141,7 +141,7 @@ def create_datasets(args, verbose=True):
     if verbose:
         print(f"Using prediction_timedelta_hours: {prediction_timedelta_hours}")
         print(f"Boundary source: {args.boundary_source}")
-        if args.boundary_source == "era5":
+        if args.boundary_source == "hres":
             print(f"Boundary resolution: {args.boundary_resolution} (apply mode: {args.boundary_lowres_apply_mode})")
 
     ds_gt = ERA5TWDatasetforAurora(
@@ -184,7 +184,7 @@ def create_datasets(args, verbose=True):
         )
         return ds_bd, ds_gt, prediction_timedelta_hours
 
-    ds_bd = BoundaryConditionDataset_ERA5(
+    ds_bd = BoundaryConditionDataset_HRES(
         boundary_root_dir=args.boundary_root_dir,
         start_date_hour=args.start_date_hour,
         end_date_hour=args.end_date_hour,
@@ -297,7 +297,7 @@ def evaluate(
     cur_base_time = None
     source = None
 
-    for batch in tqdm(loader, desc="Evaluating Era5 Boundary Forecast"):
+    for batch in tqdm(loader, desc="Evaluating HRES Boundary Forecast"):
         for item in batch:
             base_time = item["base_time"]
             lt = item["lt"]

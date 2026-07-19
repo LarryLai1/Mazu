@@ -8,7 +8,7 @@ import xarray as xr
 
 
 class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
-    # The aurora files store a per-cycle forecast trajectory, so (like era5) this source can be
+    # The aurora files store a per-cycle forecast trajectory, so (like hres) this source can be
     # served through the pipeline's prediction_timedelta fast path. GroundTruth overrides this.
     uses_forecast_source = True
 
@@ -145,13 +145,13 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
             time_values = pd.DatetimeIndex(pd.to_datetime(upper_nc.time.values))
             # Aurora files carry an absolute `time` trajectory instead of a prediction_timedelta
             # coordinate; derive the lead time (hours from the file's base/init time) so downstream
-            # selection matches the era5 path exactly.
+            # selection matches the hres path exactly.
             prediction_timedelta_hours = torch.as_tensor(
                 (time_values - date_hour) / pd.Timedelta(hours = 1),
                 dtype = torch.float32,
             )
 
-            # Force latitude descending and lat/lon as the last two dims, mirroring the era5 loader,
+            # Force latitude descending and lat/lon as the last two dims, mirroring the hres loader,
             # so the boundary always leaves the loader in the model's orientation regardless of the
             # on-disk coordinate order.
             raw_lat = torch.as_tensor(upper_nc.lat.sel(lat = latitude_slice).values)
@@ -195,7 +195,7 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
                     val_tensor = torch.flip(val_tensor, dims = (-2,))
                 source["atmos_vars"][upper_var] = val_tensor
 
-        # Keep instance-level prediction_timedelta metadata in sync with the loaded file (as era5 does).
+        # Keep instance-level prediction_timedelta metadata in sync with the loaded file (as hres does).
         self.prediction_timedelta_hours = tuple(float(x) for x in prediction_timedelta_hours.tolist())
         self.prediction_timedeltas = tuple(pd.Timedelta(hours = float(x)) for x in self.prediction_timedelta_hours)
         return source
@@ -348,7 +348,7 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
             return self._cache[base_time]
         return self._load_boundary_source_from_files(base_time)
 
-    # --- prediction_timedelta (lead-time) selection: parity with the era5 boundary path ----------
+    # --- prediction_timedelta (lead-time) selection: parity with the hres boundary path ----------
     @staticmethod
     def _prediction_timedelta_bracketing_indices(
         prediction_timedelta_hours: torch.Tensor,
@@ -451,7 +451,7 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
         base_time = pd.Timestamp(base_time)
         target_time = pd.Timestamp(target_time)
         # Historical target times (before the base cycle) come from the previous forecast cycle,
-        # matching the era5 boundary path.
+        # matching the hres boundary path.
         if target_time < base_time:
             effective_base_time = base_time - pd.Timedelta(hours = self.forecast_cycle_hours)
         else:
@@ -523,8 +523,8 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
         return result
 
 
-class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
-    # era5 files carry a prediction_timedelta forecast per cycle; served via the pipeline's
+class BoundaryConditionDataset_HRES(torch.utils.data.Dataset):
+    # hres files carry a prediction_timedelta forecast per cycle; served via the pipeline's
     # forecast-source fast path.
     uses_forecast_source = True
 
@@ -720,7 +720,7 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
             return tensor[lower_idx]
         return tensor[lower_idx] + (tensor[upper_idx] - tensor[lower_idx]) * weight
 
-    def _load_era5_source_from_files(self, date_hour: pd.Timestamp) -> dict:
+    def _load_hres_source_from_files(self, date_hour: pd.Timestamp) -> dict:
         upper_path, surface_path = self._dt_to_path(date_hour)
         latitude_bounds, longitude_bounds = self._spatial_bounds()
 
@@ -736,7 +736,7 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
             level_dim = "level" if "level" in upper_nc.dims else "pressure_level"
 
             if "prediction_timedelta" not in upper_nc.coords and "prediction_timedelta" not in upper_nc.dims:
-                raise ValueError("ERA5 boundary file must contain prediction_timedelta coordinate.")
+                raise ValueError("HRES boundary file must contain prediction_timedelta coordinate.")
 
             prediction_timedelta_hours = torch.as_tensor(
                 self._normalize_prediction_timedelta_hours(upper_nc["prediction_timedelta"].values),
@@ -909,7 +909,7 @@ class BoundaryConditionDataset_ERA5(torch.utils.data.Dataset):
         return torch.from_numpy(out).to(tensor.dtype)
 
     def _load_boundary_source_from_files(self, date_hour: pd.Timestamp) -> dict:
-        source = self._load_era5_source_from_files(date_hour)
+        source = self._load_hres_source_from_files(date_hour)
         self.prediction_timedelta_hours = tuple(float(x) for x in source["prediction_timedelta_hours"].detach().cpu().tolist())
         self.prediction_timedeltas = tuple(pd.Timedelta(hours = float(x)) for x in self.prediction_timedelta_hours)
         return source

@@ -15,3 +15,5 @@ plots.zip
 public_bash_scripts/residual*
 residual_plots*
 wavenumber_plots*
+tests/
+embedding_distance_plots/

@@ -3,8 +3,8 @@ set -euo pipefail
 
 output_dir="wavenumber_plots_output"
 
-era5_boundary_root="/tmp3/b12902101/era5_tw_forecast_0.25deg"
-era5_boundary_root_15="/tmp3/b12902101/era5_tw_forecast_1.5deg"
+hres_boundary_root="/tmp3/b12902101/hres_tw_forecast_0.25deg"
+hres_boundary_root_15="/tmp3/b12902101/hres_tw_forecast_1.5deg"
 preds_root="/tmp3/b12902101/LAM_output_preds"
 
 smooth="no"
@@ -12,8 +12,8 @@ bd_position="backbone"
 interp="nearest"
 resols=(0.25 0.5 1.5)
 
-# The ERA5 forecast is initialised on the 12h cycle; the model rollouts start at 01:00.
-era5_init_time="2020-03-01 00:00:00"
+# The HRES forecast is initialised on the 12h cycle; the model rollouts start at 01:00.
+hres_init_time="2020-03-01 00:00:00"
 model_init_time="2020-03-01 01:00:00"
 
 # Every series lands on one set of axes, so stick to one apply mode to keep the plot readable.
@@ -25,23 +25,23 @@ init_times=()
 boundary_resolutions=()
 boundary_apply_modes=()
 
-# HRES: the ERA5 forecast itself, at each resolution.
+# HRES: the HRES forecast itself, at each resolution.
 for resol in "${resols[0]}"; do
     # The 1.5deg boundary lives in its own native low-res dataset.
-    era5_dir="${era5_boundary_root}"
+    hres_dir="${hres_boundary_root}"
     if [ "${resol}" = "1.5" ]; then
-        era5_dir="${era5_boundary_root_15}"
+        hres_dir="${hres_boundary_root_15}"
     fi
 
-    preds_dirs+=("${era5_dir}")
+    preds_dirs+=("${hres_dir}")
     labels+=("HRES ${resol} ${bd_apply_mode}")
-    init_times+=("${era5_init_time}")
+    init_times+=("${hres_init_time}")
     boundary_resolutions+=("${resol}")
     boundary_apply_modes+=("${bd_apply_mode}")
 done
 
 # Baseline model run (boundary_width=0).
-preds_dirs+=("${preds_root}/era5_boundary0_${smooth}_${interp}_${bd_position}_res0.25_direct/preds")
+preds_dirs+=("${preds_root}/hres_boundary0_${smooth}_${interp}_${bd_position}_res0.25_direct/preds")
 labels+=("Baseline (boundary_width=0)")
 init_times+=("${model_init_time}")
 boundary_resolutions+=(0.25)
@@ -50,7 +50,7 @@ boundary_apply_modes+=("${bd_apply_mode}")
 # Model rollouts driven by each boundary variant. The resolution is already baked into these
 # prediction files, so the per-entry resolution is carried along only for readability.
 for resol in "${resols[@]}"; do
-    preds_dirs+=("${preds_root}/era5_boundary8_${smooth}_${interp}_${bd_position}_res${resol}_${bd_apply_mode}/preds")
+    preds_dirs+=("${preds_root}/hres_boundary8_${smooth}_${interp}_${bd_position}_res${resol}_${bd_apply_mode}/preds")
     labels+=("Boundary 8 ${resol} ${bd_apply_mode}")
     init_times+=("${model_init_time}")
     boundary_resolutions+=("${resol}")

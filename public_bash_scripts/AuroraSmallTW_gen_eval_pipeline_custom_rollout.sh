@@ -83,7 +83,8 @@ if [[ "${pred}" == "true" ]]; then
     # end_time="2020-01-02 01:00:00"
     start_time="2020-03-01 00:00:00"
     end_time="2020-03-01 01:00:00"
-    extra_args=("--save_rollout_step" $(seq 1 24) $(seq 24 6 240))
+    extra_args=("--save_rollout_step" $(seq 1 240))
+    # extra_args=("--save_rollout_step" $(seq 1 24) $(seq 24 6 240))
     # extra_args=("--save_rollout_step" $(seq 1 24) 36 48 60 72)
     output_root="/tmp3/b12902101/LAM_output_preds"
     batch_size=2
@@ -98,15 +99,15 @@ fi
 # start_time="2020-12-31 00:00:00"
 # end_time="2020-12-31 23:00:00"
 aurora_boundary_root="/tmp3/b12902101/earth2/outputs"
-era5_boundary_root="/tmp3/b12902101/era5_tw_forecast_0.25deg"
+hres_boundary_root="/tmp3/b12902101/hres_tw_forecast_0.25deg"
 # 1.5deg is a genuinely coarser dataset on disk; 0.5deg is derived on the fly by pooling
-# the 0.25deg source, so it reuses ${era5_boundary_root}.
-era5_boundary_root_15="/tmp3/b12902101/era5_tw_forecast_1.5deg"
+# the 0.25deg source, so it reuses ${hres_boundary_root}.
+hres_boundary_root_15="/tmp3/b12902101/hres_tw_forecast_1.5deg"
 ground_truth_root="/tmp3/yunye0121/era5_tw"
 
 # boundary_source="ground_truth"
-# boundary_source="era5"
-boundary_source="aurora"
+boundary_source="hres"
+# boundary_source="aurora"
 
 
 OUTPUT_FOLDER_NAME="${output_root}/${boundary_source}_boundary${boundary_width}_${boundary_smooth_mode}_${boundary_time_interp_mode}_${replace_boundary_position}_res${boundary_resolution}_${boundary_lowres_apply_mode}"
@@ -115,11 +116,11 @@ EXPERIMENT_ID=$(basename "$(dirname "$(dirname "$MODEL_CKPT_FOLDER")")")
 CKPT_NAME=$(basename "$MODEL_CKPT_FOLDER")
 LOG_FILE="./bash_outputs/${EXPERIMENT_ID}_${CKPT_NAME}.log"
 
-if [[ "${boundary_source}" == "era5" ]]; then
-    boundary_root_dir="${era5_boundary_root}"
+if [[ "${boundary_source}" == "hres" ]]; then
+    boundary_root_dir="${hres_boundary_root}"
     # Point at the native 1.5deg dataset when that resolution is requested.
     if [[ "${boundary_resolution}" == "1.5" ]]; then
-        boundary_root_dir="${era5_boundary_root_15}"
+        boundary_root_dir="${hres_boundary_root_15}"
     fi
 elif [[ "${boundary_source}" == "ground_truth" ]]; then
     boundary_root_dir="${ground_truth_root}"
@@ -154,7 +155,7 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --longitude 100 144.75 \
     --lead_time 1 \
     --input_time_window 2 \
-    --rollout_step 72 \
+    --rollout_step 240 \
     --timestep_hours 1 \
     --boundary_width ${boundary_width} \
     --boundary_source ${boundary_source} \

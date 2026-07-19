@@ -15,15 +15,15 @@ from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--var_name', type=str, default='t2m', help='Surface variable like t2m, u10, v10, msl')
-    parser.add_argument('--preds_dir', type=str, default='/tmp3/b12902101/LAM_output_preds/era5_boundary4_inject-inside_smooth_gaussian_interp_exact/preds/')
+    parser.add_argument('--preds_dir', type=str, default='/tmp3/b12902101/LAM_output_preds/hres_boundary4_inject-inside_smooth_gaussian_interp_exact/preds/')
     parser.add_argument('--output_dir', type=str, default='residual_plots')
     parser.add_argument('--plot_mode', type=str, choices=['residual', 'prediction'], default='residual', help='Plot residual or pure prediction')
     parser.add_argument('--init_time', type=str, default='2020-07-01 01:00:00', help='Plotting initialization time (format: YYYY-MM-DD HH:MM:SS)')
     parser.add_argument('--time_interp_mode', type=str, default='nearest', choices=['interpolation', 'nearest', 'exact'], help='Time interpolation mode for boundary forecast')
     parser.add_argument('--boundary_resolution', type=float, default=0.25, choices=[0.25, 0.5, 1.5],
-                        help='Resolution of the ERA5 boundary forecast. 0.25=native baseline; 0.5=pool the '
+                        help='Resolution of the HRES boundary forecast. 0.25=native baseline; 0.5=pool the '
                              '0.25deg source by 2 on the fly; 1.5=native low-res dir (point --preds_dir at '
-                             'era5_tw_forecast_1.5deg). Only used when --preds_dir holds an ERA5 forecast.')
+                             'hres_tw_forecast_1.5deg). Only used when --preds_dir holds an HRES forecast.')
     parser.add_argument('--boundary_lowres_apply_mode', type=str, default='interp', choices=['direct', 'interp'],
                         help='How a low-res boundary is mapped onto the 0.25deg grid: direct=block/nearest '
                              'footprint; interp=bilinear/linear. Ignored at --boundary_resolution 0.25.')
@@ -77,8 +77,8 @@ def main():
         lat_arr = ds_coords.latitude.sel(latitude=slice(*ds_gt.latitude)).values
         lon_arr = ds_coords.longitude.sel(longitude=slice(*ds_gt.longitude)).values
 
-    # Check if preds_dir is in BoundaryConditionDataset_ERA5 format (e.g. era5_tw_forecast_3d)
-    is_era5_forecast = False
+    # Check if preds_dir is in BoundaryConditionDataset_HRES format (e.g. hres_tw_forecast_3d)
+    is_hres_forecast = False
     standard_file_found = False
     for lt in lead_times:
         pred_filename = f"{init_time.strftime('%Y%m%d_%H%M%S')}+{lt}hr.nc"
@@ -94,17 +94,17 @@ def main():
         p2 = os.path.join(args.preds_dir, date.strftime(r"%Y%m%d"), f"{name}_upper.nc")
         p3 = os.path.join(args.preds_dir, f"{name}_upper.nc")
         if os.path.exists(p1) or os.path.exists(p2) or os.path.exists(p3):
-            is_era5_forecast = True
+            is_hres_forecast = True
 
-    if is_era5_forecast:
+    if is_hres_forecast:
         lead_times = list(range(0, 241, 24))
         # lead_times = list(range(0, 73, 6))
-        from datasets.BoundaryConditionDataset import BoundaryConditionDataset_ERA5
-        era5_init_time = init_time.floor('12h')
-        ds_bd = BoundaryConditionDataset_ERA5(
+        from datasets.BoundaryConditionDataset import BoundaryConditionDataset_HRES
+        hres_init_time = init_time.floor('12h')
+        ds_bd = BoundaryConditionDataset_HRES(
             boundary_root_dir=args.preds_dir,
-            start_date_hour=era5_init_time,
-            end_date_hour=era5_init_time,
+            start_date_hour=hres_init_time,
+            end_date_hour=hres_init_time,
             upper_variables=upper_vars,
             surface_variables=surface_vars,
             levels=[1000, 925, 850, 700, 500, 300, 150, 50],
@@ -123,9 +123,9 @@ def main():
             lowres_apply_mode=args.boundary_lowres_apply_mode,
         )
         try:
-            bd_source = ds_bd.get_boundary_source(era5_init_time)
+            bd_source = ds_bd.get_boundary_source(hres_init_time)
         except Exception as e:
-            print(f"Failed to load boundary source for era5_init_time {era5_init_time}: {e}")
+            print(f"Failed to load boundary source for hres_init_time {hres_init_time}: {e}")
             bd_source = None
     else:
         ds_bd = None
@@ -147,9 +147,9 @@ def main():
         pred_val = None
         has_pred = False
         
-        if is_era5_forecast and bd_source is not None:
+        if is_hres_forecast and bd_source is not None:
             try:
-                pred_dict = ds_bd.get_boundary_at_time_from_source(bd_source, era5_init_time, target_time)
+                pred_dict = ds_bd.get_boundary_at_time_from_source(bd_source, hres_init_time, target_time)
                 if pred_dict is not None:
                     gt_var_name = ds_gt.map_var_name_for_Aurora(args.var_name)
                     if surface_vars:
@@ -225,9 +225,9 @@ def main():
             axes[j].set_visible(False)
             
     plot_title = "Residuals" if args.plot_mode == 'residual' else "Predictions"
-    # Tag the resolution so the per-resolution ERA5 figures are tellable apart.
+    # Tag the resolution so the per-resolution HRES figures are tellable apart.
     res_tag = ""
-    if is_era5_forecast:
+    if is_hres_forecast:
         res_tag = f" @ {args.boundary_resolution}deg"
         if args.boundary_resolution != 0.25:
             res_tag += f" {args.boundary_lowres_apply_mode}"
