@@ -74,8 +74,8 @@ def main():
 
     # Convert initial times to DatetimeIndexss
     init_times_parsed = [pd.Timestamp(t) for t in args.init_times]
-    lead_times = list(range(0, 241, 12))
-    # lead_times = list(range(0, 73, 6))
+    # lead_times = list(range(0, 241, 12))
+    lead_times = list(range(0, 73, 6))
 
     # Determine time window range for Ground Truth
     min_init = min(init_times_parsed)
@@ -296,7 +296,7 @@ def main():
                     ax_ratio.plot(k_gt, ratio, alpha=0.8, linewidth=1, label=label)
 
         ax.legend(fontsize=8, loc='lower left')
-        ax_ratio.legend(fontsize=8, loc='lower left')
+        ax_ratio.legend(fontsize=8, loc='upper left')
 
     fig.suptitle(f"Zonal Wavenumber Spectrum Comparison ({args.var_name}) - Crop Width: {args.crop_width}px", fontsize=20)
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])

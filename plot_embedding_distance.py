@@ -293,7 +293,7 @@ def plot_metric(df: pd.DataFrame, metric: str, title: str, ylabel: str, labels, 
         ax.spines[spine].set_visible(False)
 
 
-def make_plots(df: pd.DataFrame, labels, args, output_dir: Path):
+def make_plots(df: pd.DataFrame, labels, args, output_dir: Path, init_time):
     for metric, title, ylabel in METRICS:
         fig, ax = plt.subplots(figsize=(args.width, args.height))
         plot_metric(df, metric, title, ylabel, labels, ax)
@@ -313,7 +313,7 @@ def make_plots(df: pd.DataFrame, labels, args, output_dir: Path):
         fig.tight_layout(rect=[0, 0.08, 1, 0.96])
     else:
         fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.suptitle("Aurora encoder embedding: prediction vs. ERA5", fontsize=14)
+    fig.suptitle(f"Prediction vs. ERA5: {init_time}", fontsize=14)
     fig.savefig(output_dir / f"embedding_summary.{args.ext}", dpi=args.dpi)
     plt.close(fig)
 
@@ -408,7 +408,8 @@ def main():
     df.to_csv(csv_path, index=False)
     logger.info("Wrote %s (%d rows)", csv_path, len(df))
 
-    make_plots(df, labels, args, output_dir)
+    for init in init_times:
+        make_plots(df, labels, args, output_dir, init)
     logger.info("Wrote plots to %s", output_dir)
 
 

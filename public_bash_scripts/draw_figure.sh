@@ -1,9 +1,9 @@
-root_dir="../LAM_output"
-var_dir="../LAM_output"
+root_dir="../LAM_output_preds"
+var_dir="../LAM_output_preds"
 suffix="MAE.csv"
 colors=("#FF0000" "#006000" "#00EC00" "#C07AB8" "#8600FF")
 
-use_baseline=false
+use_baseline=true
 if [ "${use_baseline}" = true ]; then
     csv_paths=("${root_dir}/hres_boundary0_no_nearest_backbone_res0.25_direct/${suffix}")
     styles=("linestyle=-,linewidth=2")
@@ -22,11 +22,12 @@ hres_boundary_root_15="/tmp3/b12902101/hres_tw_forecast_1.5deg"
 smooth="no"
 bd_position="backbone"
 interp="nearest"
-resols=(0.25 0.5 1.5)
+resols=(0.25)
+# resols=(0.25 0.5 1.5)
 
 # Cap the highest forecast lead time shown in the plots (hours). The CSVs still hold every
 # lead time; this only trims the x-axis at draw time. Leave empty to plot all available hours.
-max_lead_hours="72"
+max_lead_hours="240"
 
 # HRES boundary forecast itself (no model), scored at each resolution in direct apply mode.
 bd_apply_mode="direct"
@@ -44,9 +45,9 @@ for index in 0; do
         python eval_hres_boundary_forecast.py \
             --boundary_root_dir "${boundary_root_dir}" \
             --data_root_dir "/tmp3/yunye0121/era5_tw" \
-            --start_date_hour "2020-03-01 00:00:00" \
-            --end_date_hour "2020-04-01 00:00:00" \
-            --batch_size 8 \
+            --start_date_hour "2020-03-02 00:00:00" \
+            --end_date_hour "2020-03-02 00:00:00" \
+            --batch_size 1 \
             --num_workers 1 \
             --csv_output_folder "${bd_out_dir}" \
             --eval_metric "MAE" \
@@ -69,7 +70,6 @@ for index in "${!resols[@]}"; do
         fi
         csv_paths+=("${var_dir}/hres_boundary8_${smooth}_${interp}_${bd_position}_res${resol}_${apply_mode}/${suffix}")
         legend_names+=("Boundary 8 ${interp} ${smooth} ${bd_position} ${resol} ${apply_mode}")
-        # legend_names+=("Boundary 8 ${interp} ${smooth} ${bd_position}")
         if [ "${apply_mode}" == "interp" ]; then
             styles+=("linestyle=--,linewidth=2,color=${colors[${index}]}")
         else
@@ -78,29 +78,29 @@ for index in "${!resols[@]}"; do
     done
 done
 
-csv_paths+=("${var_dir}/aurora_boundary8_no_nearest_backbone_res0.25_direct/${suffix}")
-legend_names+=("Aurora boundary 8")
-styles+=("linestyle=-,linewidth=2,color=${colors[4]}")
+# csv_paths+=("${var_dir}/aurora_boundary8_no_nearest_backbone_res0.25_direct/${suffix}")
+# legend_names+=("Aurora boundary 8")
+# styles+=("linestyle=-,linewidth=2,color=${colors[4]}")
 
-# Aurora boundary forecast itself (no model), on its native 0.25deg grid.
-aurora_boundary_root="/tmp3/b12902101/earth2/outputs"
-aurora_bd_out_dir="${root_dir}/aurora_boundary_data_res0.25_direct"
-if [ ! -f "${aurora_bd_out_dir}/MAE.csv" ]; then
-    python eval_hres_boundary_forecast.py \
-        --boundary_root_dir "${aurora_boundary_root}" \
-        --boundary_source "aurora" \
-        --data_root_dir "/tmp3/yunye0121/era5_tw" \
-        --start_date_hour "2020-03-01 00:00:00" \
-        --end_date_hour "2020-04-01 00:00:00" \
-        --batch_size 8 \
-        --num_workers 1 \
-        --csv_output_folder "${aurora_bd_out_dir}" \
-        --eval_metric "MAE" \
-        --gpus "0"
-fi
-csv_paths+=("${aurora_bd_out_dir}/${suffix}")
-legend_names+=("Aurora 0.25 direct")
-styles+=("linestyle=-,linewidth=2,color=${colors[3]}")
+# # Aurora boundary forecast itself (no model), on its native 0.25deg grid.
+# aurora_boundary_root="/tmp3/b12902101/earth2/outputs"
+# aurora_bd_out_dir="${root_dir}/aurora_boundary_data_res0.25_direct"
+# if [ ! -f "${aurora_bd_out_dir}/MAE.csv" ]; then
+#     python eval_hres_boundary_forecast.py \
+#         --boundary_root_dir "${aurora_boundary_root}" \
+#         --boundary_source "aurora" \
+#         --data_root_dir "/tmp3/yunye0121/era5_tw" \
+#         --start_date_hour "2020-03-01 00:00:00" \
+#         --end_date_hour "2020-04-01 00:00:00" \
+#         --batch_size 8 \
+#         --num_workers 1 \
+#         --csv_output_folder "${aurora_bd_out_dir}" \
+#         --eval_metric "MAE" \
+#         --gpus "0"
+# fi
+# csv_paths+=("${aurora_bd_out_dir}/${suffix}")
+# legend_names+=("Aurora 0.25 direct")
+# styles+=("linestyle=-,linewidth=2,color=${colors[3]}")
 
 echo csv_paths[@]: "${csv_paths[@]}"
 

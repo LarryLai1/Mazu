@@ -474,11 +474,11 @@ def log_weather_variable_error_with_lead_time(loss_dict, t, lead_time_agg, rank)
     for v in loss_dict["atmos_vars"]:
         for l in loss_dict["atmos_vars"][v]:
             lead_time_agg[t]["atmos_vars"][v][l].update( loss_dict["atmos_vars"][v][l] )
-            if v == "z" and l == 50 and t > 60 and rank == 0:
+            if v == "z" and l == 50 and t == 60 and rank == 0:
                 # print(f"{v}_{l}, {t}: {lead_time_agg[t]["atmos_vars"][v][l]}")
                 # print(f"loss_dict: {loss_dict["atmos_vars"][v][l].sum().item()}")
                 if str(loss_dict["atmos_vars"][v][l].sum().item()) == "nan":
-                    print(loss_dict["atmos_vars"][v][l])
+                    print(loss_dict["atmos_vars"][v][l], lead_time_agg[t]["atmos_vars"][v][l])
 
 def slice_timeaxis(labels):
     timeaxis_length = next(iter(next(iter(labels.values())).values())).shape[1]

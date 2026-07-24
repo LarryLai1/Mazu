@@ -17,7 +17,7 @@ def main():
     parser.add_argument('--var_name', type=str, default='t2m', help='Surface variable like t2m, u10, v10, msl')
     parser.add_argument('--preds_dir', type=str, default='/tmp3/b12902101/LAM_output_preds/hres_boundary4_inject-inside_smooth_gaussian_interp_exact/preds/')
     parser.add_argument('--output_dir', type=str, default='residual_plots')
-    parser.add_argument('--plot_mode', type=str, choices=['residual', 'prediction'], default='residual', help='Plot residual or pure prediction')
+    parser.add_argument('--plot_mode', type=str, choices=['residual', 'prediction', 'ground_truth'], default='residual', help='Plot residual, pure prediction, or pure ground truth')
     parser.add_argument('--init_time', type=str, default='2020-07-01 01:00:00', help='Plotting initialization time (format: YYYY-MM-DD HH:MM:SS)')
     parser.add_argument('--time_interp_mode', type=str, default='nearest', choices=['interpolation', 'nearest', 'exact'], help='Time interpolation mode for boundary forecast')
     parser.add_argument('--boundary_resolution', type=float, default=0.25, choices=[0.25, 0.5, 1.5],
@@ -27,6 +27,7 @@ def main():
     parser.add_argument('--boundary_lowres_apply_mode', type=str, default='interp', choices=['direct', 'interp'],
                         help='How a low-res boundary is mapped onto the 0.25deg grid: direct=block/nearest '
                              'footprint; interp=bilinear/linear. Ignored at --boundary_resolution 0.25.')
+    parser.add_argument('--data_root_dir', type=str, default='/tmp3/yunye0121/era5_tw', help='Root directory of the ERA5 TW ground truth dataset')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -44,10 +45,10 @@ def main():
         surface_vars = [args.var_name]
 
     # Instantiate ground truth dataset
-    data_root_dir = "/tmp3/yunye0121/era5_tw"
-    
-    lead_times = [1] + list(range(24, 241, 24))
-    # lead_times = list(range(1, 25)) + [36, 48, 60, 72]
+    data_root_dir = args.data_root_dir
+
+    # lead_times = [1] + list(range(24, 241, 24))
+    lead_times = list(range(1, 25)) + [36, 48, 60, 72]
     init_time = pd.Timestamp(args.init_time)
     start_time = init_time
     end_time = init_time + pd.Timedelta(hours=max(lead_times))
@@ -80,7 +81,7 @@ def main():
     # Check if preds_dir is in BoundaryConditionDataset_HRES format (e.g. hres_tw_forecast_3d)
     is_hres_forecast = False
     standard_file_found = False
-    for lt in lead_times:
+    for lt in ([] if args.plot_mode == 'ground_truth' else lead_times):
         pred_filename = f"{init_time.strftime('%Y%m%d_%H%M%S')}+{lt}hr.nc"
         pred_path = os.path.join(args.preds_dir, pred_filename)
         if os.path.exists(pred_path):
@@ -146,8 +147,10 @@ def main():
         # Load Prediction
         pred_val = None
         has_pred = False
-        
-        if is_hres_forecast and bd_source is not None:
+
+        if args.plot_mode == 'ground_truth':
+            has_pred = True
+        elif is_hres_forecast and bd_source is not None:
             try:
                 pred_dict = ds_bd.get_boundary_at_time_from_source(bd_source, hres_init_time, target_time)
                 if pred_dict is not None:
@@ -215,6 +218,8 @@ def main():
                 residual = pred_val - gt_val
                 vmax = max(abs(residual.min()), abs(residual.max()))
                 im = ax.pcolormesh(lon_arr, lat_arr, residual, cmap='bwr', vmin=-vmax, vmax=vmax, shading='auto', transform=ccrs.PlateCarree())
+            elif args.plot_mode == 'ground_truth':
+                im = ax.pcolormesh(lon_arr, lat_arr, gt_val, cmap='viridis', vmin=99000, vmax=103500, shading='auto', transform=ccrs.PlateCarree())
             else:
                 im = ax.pcolormesh(lon_arr, lat_arr, pred_val, cmap='viridis', vmin=99000, vmax=103500, shading='auto', transform=ccrs.PlateCarree())
                 
@@ -224,7 +229,12 @@ def main():
             axes[j].set_title(f"+{lt}hr (Missing)")
             axes[j].set_visible(False)
             
-    plot_title = "Residuals" if args.plot_mode == 'residual' else "Predictions"
+    if args.plot_mode == 'residual':
+        plot_title = "Residuals"
+    elif args.plot_mode == 'ground_truth':
+        plot_title = "Ground Truth"
+    else:
+        plot_title = "Predictions"
     # Tag the resolution so the per-resolution HRES figures are tellable apart.
     res_tag = ""
     if is_hres_forecast:
@@ -233,8 +243,13 @@ def main():
             res_tag += f" {args.boundary_lowres_apply_mode}"
     plt.suptitle(f"{plot_title} for Init: {init_time.strftime('%Y-%m-%d %H:00')} ({args.var_name}){res_tag}", fontsize=24)
     plt.tight_layout(rect=[0, 0.03, 1, 0.98])
-    
-    prefix = "residual" if args.plot_mode == 'residual' else "prediction"
+
+    if args.plot_mode == 'residual':
+        prefix = "residual"
+    elif args.plot_mode == 'ground_truth':
+        prefix = "ground_truth"
+    else:
+        prefix = "prediction"
     output_path = os.path.join(args.output_dir, f"{prefix}_init_{init_time.strftime('%Y%m%d_%H%M%S')}.png")
     plt.savefig(output_path, dpi=100)
     plt.close(fig)

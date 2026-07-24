@@ -10,7 +10,8 @@ preds_root="/tmp3/b12902101/LAM_output_preds"
 smooth="no"
 bd_position="backbone"
 interp="nearest"
-resols=(0.25 0.5 1.5)
+resols=(0.25)
+# resols=(0.25 0.5 1.5)
 
 # The HRES forecast is initialised on the 12h cycle; the model rollouts start at 01:00.
 hres_init_time="2020-03-01 00:00:00"
