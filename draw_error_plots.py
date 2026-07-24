@@ -309,7 +309,9 @@ def main():
                 any_data = True
 
             ax.set_title(f"{pressure} hPa")
-            ax.grid(True)
+            plt.minorticks_on()
+            ax.grid(True, which="major")
+            ax.grid(True, which="minor", alpha=0.3, linestyle="--", linewidth=0.5)
             if ax in axes_flat[::4]:
                 ax.set_ylabel("loss value")
             if ax in axes_flat[-4:]:
@@ -363,7 +365,9 @@ def main():
         plt.tick_params(axis="x", pad=6)
         plt.tick_params(axis="y", pad=6)
         plt.title(f"{var_name}")
-        plt.grid(True)
+        plt.minorticks_on()
+        plt.grid(True, which="major")
+        plt.grid(True, which="minor", alpha=0.3, linestyle="--", linewidth=0.5)
         plt.legend(loc="best", frameon=True)
         plt.tight_layout()
 
@@ -432,7 +436,9 @@ def main():
                 any_data = True
 
             ax.set_title(display_name)
-            ax.grid(True)
+            plt.minorticks_on()
+            ax.grid(True, which="major")
+            ax.grid(True, which="minor", alpha=0.3, linestyle="--", linewidth=0.5)
             if i % 3 == 0:
                 ax.set_ylabel("loss value")
             if i >= 6:

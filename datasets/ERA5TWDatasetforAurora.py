@@ -149,8 +149,14 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
         return stacked_dict
 
     def __getitem__(self, index: int) -> tuple:
+        # start_date_hour denotes the analysis time (base = the LAST input frame), so the
+        # input window is anchored at start + index*stride and extends BACKWARD into the
+        # past. E.g. start=00:00 with input_time_window=2, lead=1 -> inputs [23:00, 00:00],
+        # base 00:00, first forecast +1hr (valid 01:00).
         date_hour_inputs = [
-            self.start_date_hour + pd.Timedelta(hours = index * self.sample_stride_hours + i * self.lead_time) \
+            self.start_date_hour + pd.Timedelta(
+                hours = index * self.sample_stride_hours + (i - (self.input_time_window - 1)) * self.lead_time
+            ) \
             for i in range(self.input_time_window)
         ]
 
@@ -245,9 +251,11 @@ class ERA5TWDatasetforAurora(torch.utils.data.Dataset):
         """
         last_index = len(self) - 1
 
-        # last input time list
+        # last input time list (base = last frame is anchored at start + index*stride; see __getitem__)
         last_input_times = [
-            self.start_date_hour + pd.Timedelta(hours=last_index * self.sample_stride_hours + i * self.lead_time)
+            self.start_date_hour + pd.Timedelta(
+                hours=last_index * self.sample_stride_hours + (i - (self.input_time_window - 1)) * self.lead_time
+            )
             for i in range(self.input_time_window)
         ]
 

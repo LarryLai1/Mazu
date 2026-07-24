@@ -81,8 +81,8 @@ batch_size=8
 if [[ "${pred}" == "true" ]]; then
     # end_time="2020-04-01 00:00:00"
     # end_time="2020-01-02 01:00:00"
-    start_time="2020-03-02 00:00:00"
-    end_time="2020-03-02 01:00:00"
+    start_time="2020-03-01 00:00:00"
+    end_time="2020-03-01 00:00:00"
     extra_args=("--save_rollout_step" $(seq 1 240))
     # extra_args=("--save_rollout_step" $(seq 1 24) $(seq 24 6 240))
     # extra_args=("--save_rollout_step" $(seq 1 24) 36 48 60 72)
@@ -96,10 +96,7 @@ else
     extra_args=()
     output_root="/tmp3/b12902101/LAM_output"
 fi
-# start_time="2020-12-31 00:00:00"
-# end_time="2020-12-31 23:00:00"
 aurora_boundary_root="/tmp3/b12902101/earth2/outputs"
-# hres_boundary_root="/tmp3/b12902101/hres_tw_forecast_0.25deg_low"
 hres_boundary_root="/tmp3/b12902101/hres_tw_forecast_0.25deg"
 hres_boundary_root_15="/tmp3/b12902101/hres_tw_forecast_1.5deg"
 ground_truth_root="/tmp3/yunye0121/era5_tw"

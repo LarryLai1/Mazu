@@ -40,8 +40,8 @@ fs = gcsfs.GCSFileSystem(token='anon')
 mapper = fs.get_mapper("gs://weatherbench2/datasets/hres/2016-2022-0012-1440x721.zarr")
 ds = xr.open_zarr(mapper, consolidated=True, decode_timedelta=False)
 ds = ds.sel(
-    # latitude=lat,
-    # longitude=lon,
+    latitude=lat,
+    longitude=lon,
     time=time,
     level=levels,
     prediction_timedelta=pred_time,
@@ -53,7 +53,7 @@ if missing_vars:
 ds = ds[existing_vars]
 
 # out_root = Path("/tmp3/b12902101/hres_tw_forecast_1.5deg")
-out_root = Path("/tmp3/b12902101/hres_tw_forecast_0.25deg_larger")
+out_root = Path("/tmp3/b12902101/hres_tw_forecast_0.25deg")
 out_root.mkdir(parents=True, exist_ok=True)
 
 def split_and_save_by_date(ds, out_root, time_values=None, limit=None):

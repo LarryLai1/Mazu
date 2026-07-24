@@ -2,10 +2,12 @@
 """
 Embedding distance / similarity between predictions and ERA5 ground truth, vs. lead time.
 
-Both the prediction and the matching ERA5 state are pushed through the *encoder* of the very
-Aurora model that produced the prediction (`Perceiver3DEncoder`, see aurora/model/encoder.py).
-The resulting latents, shape (B, L', D), are then compared. This gives a model-internal view of
-forecast error, complementary to the pixel-space MSE/MAE in `draw_error_plots.py`.
+Both the prediction and the matching ERA5 state are pushed through the very Aurora model that
+produced the prediction, and the embedding is taken as the output of the *last encoder layer of
+the Swin3D backbone* (the bottleneck latent, before any decoder layer runs). See
+`utils/embedding.py`. The resulting latents, shape (B, L', D), are then compared. This gives a
+model-internal view of forecast error, complementary to the pixel-space MSE/MAE in
+`draw_error_plots.py`.
 
 The encoder is fed a real 2-step history, as in training: for lead `t` the two history slots are
 the states at `t - history_step` and `t`. Lead 0 has no prediction file and is therefore taken
@@ -38,6 +40,7 @@ from safetensors.torch import load_file
 from aurora.batch import Batch, Metadata
 from aurora.model.aurora import AuroraSmall
 from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora
+from utils.embedding import encode_batch
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -131,48 +134,6 @@ def create_model(args):
     model.to(args.device)
     model.eval()
     return model
-
-
-@torch.no_grad()
-def encode(model, batch: Batch) -> torch.Tensor:
-    """Encode a batch, returning the latent of shape (B, L', D).
-
-    This is the `prepare_and_encode` sequence of `model_forward_with_latent_boundary` in
-    AuroraSmallTW_gen_eval_pipeline_custom_rollout.py, which is the pre-encoder pipeline the
-    real forward pass uses. Keep it in sync with that function.
-    """
-    import dataclasses
-
-    p = next(model.parameters())
-
-    batch = model.batch_transform_hook(batch)
-    batch = batch.type(p.dtype)
-    batch = batch.normalise(surf_stats=model.surf_stats)
-    batch = batch.crop(patch_size=model.patch_size)
-    batch = batch.to(p.device)
-
-    B, T = next(iter(batch.surf_vars.values())).shape[:2]
-    static_vars = {}
-    for k, v in batch.static_vars.items():
-        static_vars[k] = v[None, None].repeat(B, T, 1, 1) if v.ndim == 2 else v
-    batch = dataclasses.replace(batch, static_vars=static_vars)
-
-    transformed = batch
-    if model.positive_surf_vars:
-        transformed = dataclasses.replace(transformed, surf_vars={
-            k: v.clamp(min=0) if k in model.positive_surf_vars else v
-            for k, v in transformed.surf_vars.items()
-        })
-    if model.positive_atmos_vars:
-        transformed = dataclasses.replace(transformed, atmos_vars={
-            k: v.clamp(min=0) if k in model.positive_atmos_vars else v
-            for k, v in transformed.atmos_vars.items()
-        })
-    transformed = model._pre_encoder_hook(transformed)
-
-    # `model.timestep` (1h), not the forecast lead: the lead-time embedding must be a constant
-    # offset shared by both batches, not a trend injected into the lead-time curve.
-    return model.encoder(transformed, lead_time=model.timestep)
 
 
 # --------------------------------------------------------------------------------------
@@ -322,6 +283,7 @@ def make_plots(df: pd.DataFrame, labels, args, output_dir: Path, init_time):
 
 def main():
     args = parse_args()
+    print(args)
 
     labels = args.labels or [default_label(d) for d in args.preds_dirs]
     init_times = [pd.Timestamp(t) for t in args.init_times]
@@ -372,7 +334,7 @@ def main():
             except (FileNotFoundError, KeyError) as e:
                 logger.warning("Skipping init %s lead %dh: missing ground truth (%s).", init, lead, e)
                 continue
-            emb_gt = encode(model, gt_batch)
+            emb_gt = encode_batch(model, gt_batch)
 
             for preds_dir, label in zip(args.preds_dirs, labels):
                 try:
@@ -383,7 +345,7 @@ def main():
                     continue
 
                 pred_batch = build_batch(snap_prev, snap_curr, static_vars, lat, lon, valid_time)
-                emb_pred = encode(model, pred_batch)
+                emb_pred = encode_batch(model, pred_batch)
                 assert emb_pred.shape == emb_gt.shape, f"{emb_pred.shape} != {emb_gt.shape}"
 
                 rows.append({
