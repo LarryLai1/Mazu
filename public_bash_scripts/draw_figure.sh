@@ -1,5 +1,5 @@
-root_dir="../LAM_output_preds"
-var_dir="../LAM_output_preds"
+root_dir="../LAM_output"
+var_dir="${root_dir}"
 suffix="MAE.csv"
 colors=("#FF0000" "#006000" "#00EC00" "#C07AB8" "#8600FF")
 
@@ -27,7 +27,7 @@ resols=(0.25 0.5 1.5)
 
 # Cap the highest forecast lead time shown in the plots (hours). The CSVs still hold every
 # lead time; this only trims the x-axis at draw time. Leave empty to plot all available hours.
-max_lead_hours="72"
+max_lead_hours="240"
 
 # HRES boundary forecast itself (no model), scored at each resolution in direct apply mode.
 bd_apply_mode="direct"
@@ -46,8 +46,8 @@ for index in 0; do
             --boundary_root_dir "${boundary_root_dir}" \
             --data_root_dir "/tmp3/yunye0121/era5_tw" \
             --start_date_hour "2020-03-01 00:00:00" \
-            --end_date_hour "2020-03-01 00:00:00" \
-            --batch_size 1 \
+            --end_date_hour "2020-04-01 00:00:00" \
+            --batch_size 4 \
             --num_workers 1 \
             --csv_output_folder "${bd_out_dir}" \
             --eval_metric "MAE" \

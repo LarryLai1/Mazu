@@ -23,17 +23,17 @@ interp="nearest"
 smooth="no"
 bd_position="backbone"
 
-for resol in 0.5 1.5; do
-    for apply_mode in "direct" "interp"; do
-        echo "Starting boundary_width=8, boundary_smoothing=${smooth}, boundary_time_interp_mode=${interp} on GPU ${GPU}..."
-        LOG_FILE="./bash_outputs/hres_custom_rollout_8_${smooth}_${interp}_${bd_position}.log"
-        "${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width 8 \
-            --boundary_smooth_mode "${smooth}" \
-            --boundary_time_interp_mode "${interp}" --replace_boundary_position "${bd_position}" \
-            --boundary_resolution "${resol}" --boundary_lowres_apply_mode "${apply_mode}" \
-            --pred "true"
-    done
-done
+# for resol in 0.5 1.5; do
+#     for apply_mode in "direct" "interp"; do
+#         echo "Starting boundary_width=8, boundary_smoothing=${smooth}, boundary_time_interp_mode=${interp} on GPU ${GPU}..."
+#         LOG_FILE="./bash_outputs/hres_custom_rollout_8_${smooth}_${interp}_${bd_position}.log"
+#         "${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width 8 \
+#             --boundary_smooth_mode "${smooth}" \
+#             --boundary_time_interp_mode "${interp}" --replace_boundary_position "${bd_position}" \
+#             --boundary_resolution "${resol}" --boundary_lowres_apply_mode "${apply_mode}" \
+#             --pred "true"
+#     done
+# done
 
 for interp in "nearest"; do
     for smooth in "no"; do

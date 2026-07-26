@@ -17,3 +17,4 @@ residual_plots*
 wavenumber_plots*
 tests/
 embedding_distance_plots/
+embedding_tsne_plots/

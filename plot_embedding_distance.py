@@ -80,6 +80,27 @@ def parse_args():
     p.add_argument("--history_step", type=int, default=1,
                    help="Hours between the two history slots fed to the encoder.")
 
+    # HRES-forecast entries: a --preds_dirs entry holding no <INIT>+<LEAD>hr.nc files is treated
+    # as an ECMWF HRES forecast trajectory (e.g. hres_tw_forecast_0.25deg) and served through
+    # BoundaryConditionDataset_HRES, mirroring plot_wavenumber.py / plot_residual.py. The HRES
+    # cycle floor of each --init_times entry is used as the forecast base time.
+    p.add_argument("--forecast_cycle_hours", type=int, default=12,
+                   help="HRES forecast cycle length. Each init time is floored to this to pick the "
+                        "HRES base time.")
+    p.add_argument("--hres_time_interp_mode", type=str, default="interpolation",
+                   choices=["interpolation", "nearest", "exact"],
+                   help="How HRES's coarse (6-hourly) forecast steps are sampled at the hourly lead "
+                        "times queried here. 'interpolation' is recommended: 'nearest' collapses the "
+                        "two adjacent history slots onto the same step when history_step is small.")
+    p.add_argument("--boundary_resolutions", type=float, nargs="*", default=None,
+                   choices=[0.25, 0.5, 1.5],
+                   help="Per-entry HRES boundary resolution, parallel to --preds_dirs (defaults to "
+                        "0.25 everywhere). Ignored for entries holding model predictions.")
+    p.add_argument("--boundary_lowres_apply_modes", type=str, nargs="*", default=None,
+                   choices=["direct", "interp"],
+                   help="Per-entry HRES apply mode, parallel to --preds_dirs (defaults to interp "
+                        "everywhere). Ignored at resolution 0.25 / for model predictions.")
+
     p.add_argument("--data_root_dir", type=str, default="/tmp3/yunye0121/era5_tw")
     p.add_argument("--checkpoint_path", type=str,
                    default="/tmp2/yuanlim0919/lateral_smooth/model_weights/Aurora/model.safetensors")
@@ -100,6 +121,12 @@ def parse_args():
 
     if args.labels is not None and len(args.labels) != len(args.preds_dirs):
         p.error(f"--labels has {len(args.labels)} entries but --preds_dirs has {len(args.preds_dirs)}.")
+    if args.boundary_resolutions is not None and len(args.boundary_resolutions) != len(args.preds_dirs):
+        p.error(f"--boundary_resolutions has {len(args.boundary_resolutions)} entries but "
+                f"--preds_dirs has {len(args.preds_dirs)}.")
+    if args.boundary_lowres_apply_modes is not None and len(args.boundary_lowres_apply_modes) != len(args.preds_dirs):
+        p.error(f"--boundary_lowres_apply_modes has {len(args.boundary_lowres_apply_modes)} entries but "
+                f"--preds_dirs has {len(args.preds_dirs)}.")
     return args
 
 
@@ -107,6 +134,23 @@ def default_label(preds_dir: str) -> str:
     """`.../hres_boundary8_..._res0.5_direct/preds` -> `hres_boundary8_..._res0.5_direct`."""
     path = Path(preds_dir.rstrip("/"))
     return path.parent.name if path.name == "preds" else path.name
+
+
+def is_hres_forecast_dir(preds_dir: str, init_times, lead_times) -> bool:
+    """True if `preds_dir` holds no standard <INIT>+<LEAD>hr.nc file.
+
+    Such a directory is an ECMWF HRES forecast trajectory (per-cycle prediction_timedelta files)
+    rather than a model rollout, so it is served through BoundaryConditionDataset_HRES. Mirrors
+    the auto-detection in plot_wavenumber.py / plot_residual.py.
+    """
+    for init in init_times:
+        for lead in lead_times:
+            if lead == 0:
+                continue
+            path = os.path.join(preds_dir, f"{init.strftime('%Y%m%d_%H%M%S')}+{lead}hr.nc")
+            if os.path.exists(path):
+                return False
+    return True
 
 
 # --------------------------------------------------------------------------------------
@@ -141,11 +185,31 @@ def create_model(args):
 # --------------------------------------------------------------------------------------
 
 class SnapshotLoader:
-    """Loads single-timestep states as {"surf_vars": {(H,W)}, "atmos_vars": {(L,H,W)}}."""
+    """Loads single-timestep states as {"surf_vars": {(H,W)}, "atmos_vars": {(L,H,W)}}.
 
-    def __init__(self, ds_gt: ERA5TWDatasetforAurora):
+    A `preds_dir` registered in `hres_datasets` is an HRES forecast trajectory and is served from
+    its `BoundaryConditionDataset_HRES` instead of `<INIT>+<LEAD>hr.nc` files. For those entries the
+    forecast base time is `init.floor(forecast_cycle_hours)` and there is no ground-truth substitute
+    at lead 0: the HRES forecast state valid at each time is used throughout, so the whole line
+    represents the HRES trajectory rather than a mix of HRES and ERA5.
+    """
+
+    def __init__(self, ds_gt: ERA5TWDatasetforAurora, hres_datasets: dict | None = None,
+                 forecast_cycle_hours: int = 12):
         self.ds_gt = ds_gt
+        self.hres_datasets = hres_datasets or {}
+        self.forecast_cycle_hours = forecast_cycle_hours
         self._cache: dict = {}
+        self._hres_source_cache: dict = {}
+
+    def is_hres(self, preds_dir: str) -> bool:
+        return preds_dir in self.hres_datasets
+
+    def _hres_source(self, preds_dir: str, base_time: pd.Timestamp) -> dict:
+        key = (preds_dir, base_time)
+        if key not in self._hres_source_cache:
+            self._hres_source_cache[key] = self.hres_datasets[preds_dir].get_boundary_source(base_time)
+        return self._hres_source_cache[key]
 
     def gt(self, time: pd.Timestamp) -> dict:
         key = ("gt", time)
@@ -158,6 +222,24 @@ class SnapshotLoader:
         return self._cache[key]
 
     def pred(self, preds_dir: str, init: pd.Timestamp, lead: int) -> dict:
+        # HRES forecast entries: pull the forecast state valid at `init + lead` from the HRES
+        # cycle that `init` floors onto. Unlike model rollouts, lead 0 is *not* replaced by ground
+        # truth -- the HRES trajectory (including its state near init) is what we want to compare.
+        if preds_dir in self.hres_datasets:
+            ds_bd = self.hres_datasets[preds_dir]
+            base_time = init.floor(f"{self.forecast_cycle_hours}h")
+            valid_time = init + pd.Timedelta(hours=lead)
+            source = self._hres_source(preds_dir, base_time)
+            snap = ds_bd.get_boundary_at_time_from_source(source, base_time, valid_time)
+            if snap is None:
+                raise FileNotFoundError(
+                    f"HRES snapshot unavailable for {preds_dir} valid {valid_time} "
+                    f"(base {base_time}, interp mode {ds_bd.time_interp_mode})")
+            return {
+                "surf_vars": {k: torch.as_tensor(v) for k, v in snap["surf_vars"].items()},
+                "atmos_vars": {k: torch.as_tensor(v) for k, v in snap["atmos_vars"].items()},
+            }
+
         # There is no +0hr prediction file: the analysis at init time *is* the ground truth.
         if lead == 0:
             return self.gt(init)
@@ -183,6 +265,7 @@ class SnapshotLoader:
 
     def clear(self):
         self._cache.clear()
+        self._hres_source_cache.clear()
 
 
 def build_batch(snap_prev: dict, snap_curr: dict, static_vars: dict,
@@ -249,7 +332,9 @@ def plot_metric(df: pd.DataFrame, metric: str, title: str, ylabel: str, labels, 
     ax.set_xlabel("lead time (h)")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
-    ax.grid(True, alpha=0.3)
+    ax.minorticks_on()
+    ax.grid(True, which="major")
+    ax.grid(True, which="minor", alpha=0.3, linestyle="--", linewidth=0.5)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
 
@@ -313,8 +398,43 @@ def main():
     static_vars = ds_gt.get_static_vars_ds()["static_vars"]
     logger.info("Grid: %d lat x %d lon", len(lat), len(lon))
 
+    # Detect which --preds_dirs entries are HRES forecast trajectories and build a loader for each.
+    resolutions = args.boundary_resolutions or [0.25] * len(args.preds_dirs)
+    apply_modes = args.boundary_lowres_apply_modes or ["interp"] * len(args.preds_dirs)
+    hres_datasets = {}
+    for preds_dir, resolution, apply_mode in zip(args.preds_dirs, resolutions, apply_modes):
+        if not is_hres_forecast_dir(preds_dir, init_times, lead_times):
+            continue
+        from datasets.BoundaryConditionDataset import BoundaryConditionDataset_HRES
+        base_times = [init.floor(f"{args.forecast_cycle_hours}h") for init in init_times]
+        hres_datasets[preds_dir] = BoundaryConditionDataset_HRES(
+            boundary_root_dir=preds_dir,
+            start_date_hour=min(base_times),
+            end_date_hour=max(base_times),
+            upper_variables=UPPER_VARIABLES,
+            surface_variables=SURFACE_VARIABLES,
+            levels=LEVELS,
+            latitude=LATITUDE,
+            longitude=LONGITUDE,
+            boundary_width=0,
+            # HRES reads its own (6-hourly) prediction_timedelta axis from file; this arg only sizes
+            # the unused time_axis, so the native 0..240h/6h range is a safe placeholder.
+            prediction_timedeltas=list(range(0, 241, 6)),
+            forecast_cycle_hours=args.forecast_cycle_hours,
+            use_cache=False,
+            time_interp_mode=args.hres_time_interp_mode,
+            # Bring the forecast back onto the ERA5 model grid so its embedding is comparable.
+            target_latitude=lat,
+            target_longitude=lon,
+            boundary_resolution=resolution,
+            lowres_apply_mode=apply_mode,
+        )
+        logger.info("HRES forecast entry: %s (resolution %s, apply %s, interp %s)",
+                    preds_dir, resolution, apply_mode, args.hres_time_interp_mode)
+
     model = create_model(args)
-    loader = SnapshotLoader(ds_gt)
+    loader = SnapshotLoader(ds_gt, hres_datasets=hres_datasets,
+                            forecast_cycle_hours=args.forecast_cycle_hours)
 
     rows = []
     for init in init_times:

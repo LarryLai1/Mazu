@@ -1,16 +1,26 @@
 #!/bin/bash
-# Singe_GPU inference script for AuroraTW weather model.
+# Single/multi-GPU inference script for AuroraTW weather model, WITH Swin3D bottleneck
+# embedding extraction (flattened, pred + ground truth) piggybacked onto the same rollout.
+#
+# This is a copy of AuroraSmallTW_gen_eval_pipeline_custom_rollout.sh pointed at
+# AuroraSmallTW_gen_eval_pipeline_with_embeddings.py instead of the original pipeline script,
+# with --embedding_output_dir/--embedding_save_steps added. Everything else (data roots,
+# boundary config, --lazy_mode, --gpus, ...) is unchanged, so predictions/.nc/.csv output
+# stay exactly where the original script would put them; only the new embeddings/ output
+# is added, and it is written OUTSIDE Mazu/, under /tmp3/b12902101/mazu_embedding_output/.
 set -eo pipefail
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 usage() {
-    echo "Usage: $0 [--gpus GPU_IDS] [--boundary_width N] [--pred true|false]" >&2
-    echo "  --gpus GPU_IDS           CUDA_VISIBLE_DEVICES value (default: 3,4,5)" >&2
+    echo "Usage: $0 [--gpus GPU_IDS] [--boundary_width N] [--pred true|false] [--embedding_save_steps \"1 6 24 72\"]" >&2
+    echo "  --gpus GPU_IDS           CUDA_VISIBLE_DEVICES value (default: 0,1)" >&2
     echo "  --boundary_width N       Boundary width (default: 2)" >&2
     echo "  --boundary_resolution R  Boundary resolution: 0.25|0.5|1.5 (default: 0.25)" >&2
     echo "  --boundary_lowres_apply_mode M  direct|interp (default: interp)" >&2
     echo "  --pred VALUE             Enable prediction mode (true/false, default: false)" >&2
+    echo "  --embedding_save_steps \"S1 S2 ...\"  Rollout steps to extract embeddings for (default: \"1 6 24 72\")" >&2
+    echo "  --no_embeddings          Disable embedding extraction entirely (predictions only, like the original script)" >&2
 }
 
 CUDA_VISIBLE_DEVICES_VALUE="0,1"
@@ -22,6 +32,8 @@ replace_boundary_position="encoder"
 boundary_resolution="0.25"
 boundary_lowres_apply_mode="interp"
 pred="false"
+embedding_save_steps="1 6 24 72"
+enable_embeddings="true"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -61,6 +73,14 @@ while [[ $# -gt 0 ]]; do
             boundary_lowres_apply_mode="$2"
             shift 2
             ;;
+        --embedding_save_steps)
+            embedding_save_steps="$2"
+            shift 2
+            ;;
+        --no_embeddings)
+            enable_embeddings="false"
+            shift 1
+            ;;
         -h|--help)
             usage
             exit 0
@@ -79,17 +99,10 @@ MODEL_CKPT_PATH="/tmp2/yuanlim0919/lateral_smooth/model_weights/Aurora/model.saf
 
 batch_size=8
 if [[ "${pred}" == "true" ]]; then
-    # end_time="2020-04-01 00:00:00"
-    # end_time="2020-01-02 01:00:00"
     start_time="2020-03-01 00:00:00"
     end_time="2020-03-31 23:00:00"
     extra_args=("--save_rollout_step" 72)
-    # extra_args=("--save_rollout_step" $(seq 1 240))
-    # extra_args=("--save_rollout_step" $(seq 1 24) $(seq 24 6 240))
     output_root="/tmp3/b12902101/LAM_output_preds"
-    # batch_size=2
-    # CUDA_VISIBLE_DEVICES_VALUE=${CUDA_VISIBLE_DEVICES_VALUE:0:1}
-    # export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 else
     start_time="2020-03-01 00:00:00"
     end_time="2020-03-31 23:00:00"
@@ -105,8 +118,22 @@ ground_truth_root="/tmp3/yunye0121/era5_tw"
 boundary_source="hres"
 # boundary_source="aurora"
 
-
 OUTPUT_FOLDER_NAME="${output_root}/${boundary_source}_boundary${boundary_width}_${boundary_smooth_mode}_${boundary_time_interp_mode}_${replace_boundary_position}_res${boundary_resolution}_${boundary_lowres_apply_mode}"
+
+# Embedding output is kept OUTSIDE Mazu/, tagged with the same run-config suffix as
+# OUTPUT_FOLDER_NAME above so multiple configs (e.g. baseline vs. boundary-replacement) can
+# later be compared side by side in plot_embedding_tsne_hooked.py via --embeddings_dirs/--labels.
+EMBEDDING_OUTPUT_ROOT="/tmp3/b12902101/mazu_embedding_output"
+EMBEDDING_OUTPUT_DIR="${EMBEDDING_OUTPUT_ROOT}/embeddings/${boundary_source}_boundary${boundary_width}_${replace_boundary_position}_res${boundary_resolution}_${boundary_lowres_apply_mode}"
+
+embedding_args=()
+if [[ "${enable_embeddings}" == "true" ]]; then
+    mkdir -p "${EMBEDDING_OUTPUT_DIR}"
+    embedding_args=(
+        "--embedding_output_dir" "${EMBEDDING_OUTPUT_DIR}"
+        "--embedding_save_steps" ${embedding_save_steps}
+    )
+fi
 
 EXPERIMENT_ID=$(basename "$(dirname "$(dirname "$MODEL_CKPT_FOLDER")")")
 CKPT_NAME=$(basename "$MODEL_CKPT_FOLDER")
@@ -134,7 +161,7 @@ if [[ "${RESUME_INFERENCE:-}" == "1" || "${RESUME_INFERENCE:-}" == "true" ]]; th
 fi
 
 time \
-python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
+python ./AuroraSmallTW_gen_eval_pipeline_with_embeddings.py \
     --data_root_dir /work/yunye0121/era5_tw \
     --boundary_root_dir "${boundary_root_dir}" \
     --checkpoint_path "${MODEL_CKPT_PATH}" \
@@ -151,7 +178,7 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --longitude 100 144.75 \
     --lead_time 1 \
     --input_time_window 2 \
-    --rollout_step 72 \
+    --rollout_step 169 \
     --timestep_hours 1 \
     --boundary_width ${boundary_width} \
     --boundary_source ${boundary_source} \
@@ -169,4 +196,5 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --lazy_prefetch_steps 2 \
     "${resume_args[@]}" \
     "${extra_args[@]}" \
+    "${embedding_args[@]}" \
     # 2>&1 | tee "${LOG_FILE}"
