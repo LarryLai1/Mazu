@@ -21,6 +21,9 @@ usage() {
     echo "  --pred VALUE             Enable prediction mode (true/false, default: false)" >&2
     echo "  --embedding_save_steps \"S1 S2 ...\"  Rollout steps to extract embeddings for (default: \"1 6 24 72\")" >&2
     echo "  --no_embeddings          Disable embedding extraction entirely (predictions only, like the original script)" >&2
+    echo "  --embedding_metrics      Compute embedding distance (cos/L2 vs ERA5) at EVERY rollout step" >&2
+    echo "                           on the fly and write a CSV + plots; stores no embeddings and" >&2
+    echo "                           no .nc predictions. Implies --no_embeddings." >&2
 }
 
 CUDA_VISIBLE_DEVICES_VALUE="0,1"
@@ -34,6 +37,7 @@ boundary_lowres_apply_mode="interp"
 pred="false"
 embedding_save_steps="1 6 24 72"
 enable_embeddings="true"
+embedding_metrics="false"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -81,6 +85,13 @@ while [[ $# -gt 0 ]]; do
             enable_embeddings="false"
             shift 1
             ;;
+        --embedding_metrics)
+            embedding_metrics="true"
+            # The metric mode exists precisely because the per-sample embeddings do not fit on
+            # disk, so never dump them alongside it.
+            enable_embeddings="false"
+            shift 1
+            ;;
         -h|--help)
             usage
             exit 0
@@ -104,7 +115,7 @@ if [[ "${pred}" == "true" ]]; then
     extra_args=("--save_rollout_step" 72)
     output_root="/tmp3/b12902101/LAM_output_preds"
 else
-    start_time="2020-03-01 00:00:00"
+    start_time="2020-03-10 00:00:00"
     end_time="2020-03-31 23:00:00"
     extra_args=()
     output_root="/tmp3/b12902101/LAM_output"
@@ -124,7 +135,11 @@ OUTPUT_FOLDER_NAME="${output_root}/${boundary_source}_boundary${boundary_width}_
 # OUTPUT_FOLDER_NAME above so multiple configs (e.g. baseline vs. boundary-replacement) can
 # later be compared side by side in plot_embedding_tsne_hooked.py via --embeddings_dirs/--labels.
 EMBEDDING_OUTPUT_ROOT="/tmp3/b12902101/mazu_embedding_output"
-EMBEDDING_OUTPUT_DIR="${EMBEDDING_OUTPUT_ROOT}/embeddings/${boundary_source}_boundary${boundary_width}_${replace_boundary_position}_res${boundary_resolution}_${boundary_lowres_apply_mode}"
+RUN_CONFIG_SUFFIX="${boundary_source}_boundary${boundary_width}_${replace_boundary_position}_res${boundary_resolution}_${boundary_lowres_apply_mode}"
+EMBEDDING_OUTPUT_DIR="${EMBEDDING_OUTPUT_ROOT}/embeddings/${RUN_CONFIG_SUFFIX}"
+# On-the-fly cos/L2-vs-ERA5 curves. Same run-config suffix, so several configs can be compared
+# by pointing plot_embedding_distance.py-style plots at the sibling directories.
+EMBEDDING_METRICS_DIR="${EMBEDDING_OUTPUT_ROOT}/embedding_distance/${RUN_CONFIG_SUFFIX}"
 
 embedding_args=()
 if [[ "${enable_embeddings}" == "true" ]]; then
@@ -133,6 +148,16 @@ if [[ "${enable_embeddings}" == "true" ]]; then
         "--embedding_output_dir" "${EMBEDDING_OUTPUT_DIR}"
         "--embedding_save_steps" ${embedding_save_steps}
     )
+fi
+if [[ "${embedding_metrics}" == "true" ]]; then
+    mkdir -p "${EMBEDDING_METRICS_DIR}"
+    embedding_args+=(
+        "--embedding_metrics_output_dir" "${EMBEDDING_METRICS_DIR}"
+        "--embedding_metrics_label" "${RUN_CONFIG_SUFFIX}"
+    )
+    # Metrics mode covers every rollout step by default and writes no predictions: drop any
+    # --save_rollout_step so nothing lands on disk but the CSV and the plots.
+    extra_args=()
 fi
 
 EXPERIMENT_ID=$(basename "$(dirname "$(dirname "$MODEL_CKPT_FOLDER")")")

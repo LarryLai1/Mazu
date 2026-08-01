@@ -151,7 +151,7 @@ python ./AuroraSmallTW_gen_eval_pipeline_custom_rollout.py \
     --longitude 100 144.75 \
     --lead_time 1 \
     --input_time_window 2 \
-    --rollout_step 72 \
+    --rollout_step 168 \
     --timestep_hours 1 \
     --boundary_width ${boundary_width} \
     --boundary_source ${boundary_source} \

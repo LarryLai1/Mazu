@@ -31,6 +31,6 @@ python plot_embedding_tsne_hooked.py \
         "${EMBED_ROOT}/hres_boundary8_backbone_res0.25_direct" \
         "${EMBED_ROOT}/hres_forecast_res0.25" \
     --labels baseline "boundary replacement" "hres boundary 0.25" \
-    --init_days 3 \
+    --init_days 5 \
     --perplexity 60 \
     --output_dir /tmp3/b12902101/mazu_embedding_output/tsne_plots

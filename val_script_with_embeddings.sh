@@ -43,8 +43,7 @@ for resol in 0.25; do
             --boundary_smooth_mode "${smooth}" \
             --boundary_time_interp_mode "${interp}" --replace_boundary_position "${bd_position}" \
             --boundary_resolution "${resol}" --boundary_lowres_apply_mode "${apply_mode}" \
-            --embedding_save_steps "${EMBEDDING_SAVE_STEPS}" \
-            --pred "true"
+            --embedding_save_steps "${EMBEDDING_SAVE_STEPS}"
     done
 done
 
@@ -53,8 +52,7 @@ done
         --boundary_time_interp_mode "nearest" \
         --replace_boundary_position "backbone" \
         --boundary_lowres_apply_mode "direct" \
-        --embedding_save_steps "${EMBEDDING_SAVE_STEPS}" \
-        --pred "true"
+        --embedding_save_steps "${EMBEDDING_SAVE_STEPS}"
 
 TOTAL_TIME=$((SECONDS))
 echo "All jobs completed in ${TOTAL_TIME}s."

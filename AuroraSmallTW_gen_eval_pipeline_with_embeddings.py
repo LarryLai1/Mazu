@@ -16,7 +16,25 @@ plot_embedding_tsne_hooked.py).
   SnapshotLoader/build_batch, decoupled from the live (possibly error-accumulating)
   rollout trajectory.
 
-Every change here is gated behind --embedding_output_dir: leave it unset and this script
+There are two, independently selectable consumers of those embeddings:
+
+- --embedding_output_dir: save them as flattened .npz files (one per sample per save-step).
+- --embedding_metrics_output_dir: never store them at all -- compare each rollout step's
+  prediction embedding against the matching ERA5 ground-truth embedding on the spot (cosine
+  similarity + L2, token-wise and pooled, via plot_embedding_distance.embedding_metrics),
+  accumulate running sums per lead time, and at the end write one CSV averaged over init times
+  plus the same plots plot_embedding_distance.py draws. This is the mode to use when neither
+  the embeddings (~3 MB/sample/step) nor the .nc predictions fit on disk.
+
+  NOTE: embeddings here come from the model's real forward pass (the hook), whereas
+  plot_embedding_distance.py re-derives them through utils.embedding.encode_batch, which runs
+  a hand-rolled copy of the pre-encoder with lead_time=model.timestep. The numbers are
+  therefore close but not bit-identical between the two scripts; this one is the one that
+  reflects actual inference, including latent boundary replacement. The metric mode also
+  keeps the ground truth's metadata time as pd.Timestamp, matching the rollout's own batches
+  (see the timezone note at the ground-truth extraction site) -- the .npz path does not.
+
+Every change here is gated behind those two flags: leave them unset and this script
 is behaviourally identical to the original AuroraSmallTW_gen_eval_pipeline_custom_rollout.py.
 All new code is marked with "=== EMBEDDING EXTRACTION ===" so it stays easy to diff against
 upstream after this file's original inevitably evolves.
@@ -36,6 +54,7 @@ import random
 import numpy as np
 import sys
 import os
+from types import SimpleNamespace
 
 from aurora import Batch, Metadata
 # from aurora import rollout
@@ -51,7 +70,16 @@ from utils.metrics import prepare_each_lead_time_agg
 # (not from our --levels arg) -- evaluate() asserts args.levels matches LEVELS before using
 # it, so a future edit to either file's level list fails loudly instead of silently building
 # a wrong ground-truth Batch.
-from plot_embedding_distance import SnapshotLoader, build_batch, LEVELS as _EMBED_GT_LEVELS
+#
+# The on-the-fly metric mode (--embedding_metrics_output_dir) additionally reuses that script's
+# metric definitions and plotting, so the two paths cannot drift apart.
+from plot_embedding_distance import (
+    SnapshotLoader,
+    build_batch,
+    embedding_metrics,
+    make_plots,
+    LEVELS as _EMBED_GT_LEVELS,
+)
 
 from pathlib import Path
 
@@ -89,9 +117,8 @@ def attach_swin_output_hook(model):
     return handle, buf
 
 
-def flatten_hook_tokens(buf, dtype, expected_batch=None):
-    """(B, L, D) bottleneck tokens -> (B, L*D) flattened per-sample vectors (Mazu-style:
-    emb.reshape(-1) per sample, NOT SOFT's mean-pool).
+def hook_tokens(buf, expected_batch=None):
+    """Consume the hook buffer and return the bottleneck tokens, shape (B, L, D).
 
     When boundary replacement is applied at the backbone level (--replace_boundary_position
     backbone), Swin3DTransformerBackbone.forward concatenates the main state and the
@@ -99,11 +126,19 @@ def flatten_hook_tokens(buf, dtype, expected_batch=None):
     (see aurora/model/swin3d.py: `x_all = torch.cat([x, x_bc], dim=0)`), splitting them apart
     only after our hooked layer. So the hook sees 2*B rows, not B, whenever that path is taken.
     `expected_batch`, when given, keeps only the leading rows (the real rollout samples --
-    x_bc's own encoding is not something we want saved as a prediction embedding).
+    x_bc's own encoding is not something we want treated as a prediction embedding).
     """
     tokens = buf.pop("tokens")
     if expected_batch is not None and tokens.shape[0] > expected_batch:
         tokens = tokens[:expected_batch]
+    return tokens
+
+
+def flatten_hook_tokens(buf, dtype, expected_batch=None):
+    """(B, L, D) bottleneck tokens -> (B, L*D) flattened per-sample vectors (Mazu-style:
+    emb.reshape(-1) per sample, NOT SOFT's mean-pool).
+    """
+    tokens = hook_tokens(buf, expected_batch)
     return tokens.to(dtype).reshape(tokens.shape[0], -1).cpu().numpy()
 
 
@@ -125,6 +160,61 @@ def _embed_window(model, batch, hook_buf, dtype):
     return flatten_hook_tokens(hook_buf, dtype)
 
 
+def _embed_window_batched(model, batch, hook_buf):
+    """Like _embed_window, but forwards the WHOLE batch in one call and returns the raw
+    (B, L, D) bottleneck tokens instead of flattened per-sample numpy vectors.
+
+    Used by the on-the-fly metric mode, where every rollout step is evaluated: one extra
+    forward per step (instead of one per sample per step) keeps the added cost at ~2x the
+    plain rollout regardless of --batch_size.
+    """
+    b = model.batch_transform_hook(batch)
+    p = next(model.parameters())
+    b = b.type(p.dtype).crop(model.patch_size).to(p.device)
+    hook_buf.clear()
+    with torch.no_grad():
+        _ = model(b)
+    if "tokens" not in hook_buf:
+        raise RuntimeError("Swin3D bottleneck hook did not fire during embedding extraction.")
+    return hook_tokens(hook_buf, expected_batch = next(iter(batch.surf_vars.values())).shape[0])
+
+
+# --- On-the-fly embedding-distance metrics -------------------------------------------
+# Same six numbers plot_embedding_distance.embedding_metrics() returns, accumulated as
+# running sums per lead time so nothing per-sample is ever held (or written) -- the whole
+# point of this mode is that neither embeddings nor predictions fit on disk.
+
+_EMBED_METRIC_KEYS = [
+    "cos_token", "cos_pooled", "l2_token", "l2_pooled", "rel_l2_token", "rel_l2_pooled",
+]
+
+
+def _new_embed_metric_agg(rollout_step, lead_time):
+    return {
+        t * lead_time: {"count": 0, **{k: 0.0 for k in _EMBED_METRIC_KEYS}}
+        for t in range(1, rollout_step + 1)
+    }
+
+
+def _update_embed_metric_agg(agg, lead_hours, metrics):
+    entry = agg[lead_hours]
+    entry["count"] += 1
+    for k in _EMBED_METRIC_KEYS:
+        entry[k] += float(metrics[k])
+
+
+def _embed_metrics_to_state(agg):
+    return {str(t): dict(entry) for t, entry in agg.items()}
+
+
+def _merge_embed_metrics_state(agg, state):
+    for t, entry in state.items():
+        ti = int(t)
+        agg[ti]["count"] += int(entry["count"])
+        for k in _EMBED_METRIC_KEYS:
+            agg[ti][k] += float(entry[k])
+
+
 def _save_embedding_npz(out_dir, init_time, lead_hours, rollout_step, pred_vec, gt_vec):
     path = Path(out_dir) / f"{init_time.strftime('%Y%m%d_%H%M%S')}+{lead_hours}hr.npz"
     np.savez(
@@ -135,6 +225,44 @@ def _save_embedding_npz(out_dir, init_time, lead_hours, rollout_step, pred_vec, 
         lead_time=lead_hours,
         rollout_step=rollout_step,
     )
+
+def _consume_pending_embedding(args, hook_buf, dtype, lead_step, pending, embed_metric_agg):
+    """Read the prediction-side tokens the hook just captured and hand them to whichever
+    consumers asked for this step: the .npz dump (`pending["gt_vecs"]`) and/or the on-the-fly
+    distance metrics (`pending["gt_tokens"]`).
+
+    Called once per pending step, so the hook buffer is popped exactly once no matter how many
+    consumers are active.
+    """
+    dates = pending["dates"]
+    pred_tokens = hook_tokens(hook_buf, expected_batch = len(dates))
+    assert pred_tokens.shape[0] == len(dates), \
+        f"hook returned {pred_tokens.shape[0]} rows for a batch of {len(dates)}"
+    lead_hours = lead_step * args.lead_time
+
+    if "gt_tokens" in pending:
+        gt_tokens = pending["gt_tokens"]
+        assert pred_tokens.shape == gt_tokens.shape, \
+            f"{tuple(pred_tokens.shape)} != {tuple(gt_tokens.shape)}"
+        for i in range(len(dates)):
+            _update_embed_metric_agg(
+                embed_metric_agg,
+                lead_hours,
+                embedding_metrics(pred_tokens[i : i + 1], gt_tokens[i : i + 1]),
+            )
+
+    if "gt_vecs" in pending:
+        pred_vecs = pred_tokens.to(dtype).reshape(pred_tokens.shape[0], -1).cpu().numpy()
+        for i in range(pred_vecs.shape[0]):
+            _save_embedding_npz(
+                args.embedding_output_dir,
+                pd.Timestamp(dates[i]),
+                lead_hours,
+                lead_step,
+                pred_vecs[i],
+                pending["gt_vecs"][i],
+            )
+
 
 def set_seed(seed):
     random.seed(seed)
@@ -300,8 +428,31 @@ def parse_args():
         choices = list(_EMBED_DTYPES.keys()),
         help = 'Storage dtype for the flattened embedding vectors.',
     )
+    parser.add_argument(
+        '--embedding_metrics_output_dir',
+        type = str,
+        default = None,
+        help = 'If set, compute embedding distance/similarity (cosine + L2, token-wise and '
+               'pooled) between the rollout prediction and the matching ERA5 ground truth at '
+               'EVERY rollout step while the rollout runs, average over init times, and write '
+               'embedding_distance.csv + plots here. Nothing per-sample is kept, so this needs no '
+               'stored embeddings and no stored predictions. Independent of '
+               '--embedding_output_dir: either, both or neither may be set.',
+    )
+    parser.add_argument(
+        '--embedding_metrics_label',
+        type = str,
+        default = None,
+        help = 'Legend label for the embedding-metric plots. Defaults to the basename of '
+               '--embedding_metrics_output_dir.',
+    )
 
     return parser.parse_args()
+
+
+def _embedding_features_enabled(args):
+    """True if anything needs the Swin3D bottleneck hook attached."""
+    return bool(args.embedding_output_dir) or bool(args.embedding_metrics_output_dir)
 
 def _resolve_mp_world_size(args):
     # If user explicitly provided GPU ids, use that
@@ -409,9 +560,14 @@ def _inference_ckpt_signature(args, rank, world_size, num_samples):
         "input_time_window": args.input_time_window,
         "start_date_hour": args.start_date_hour,
         "end_date_hour": args.end_date_hour,
+        # === EMBEDDING EXTRACTION === restoring embedding sums into a run that no longer
+        # computes them (or computes them over different steps) would silently mix two runs.
+        "embedding_metrics_enabled": bool(args.embedding_metrics_output_dir),
+        "embedding_save_steps": sorted(args.embedding_save_steps) if args.embedding_save_steps else None,
     }
 
-def _save_inference_ckpt(args, rank, world_size, num_samples, completed_batches, err_agg_list):
+def _save_inference_ckpt(args, rank, world_size, num_samples, completed_batches, err_agg_list,
+                         embed_metric_agg = None):
     path = _inference_ckpt_path(args, rank)
     path.parent.mkdir(parents = True, exist_ok = True)
     payload = {
@@ -421,6 +577,8 @@ def _save_inference_ckpt(args, rank, world_size, num_samples, completed_batches,
             metric: _err_agg_to_state(err_agg)
             for metric, err_agg in zip(args.eval_metric, err_agg_list)
         },
+        # === EMBEDDING EXTRACTION ===
+        "embedding_metrics": _embed_metrics_to_state(embed_metric_agg) if embed_metric_agg is not None else None,
     }
     # Write to a temp file then atomically rename, so a crash mid-write can never leave a
     # truncated/corrupt checkpoint behind: a reader always sees either the complete old
@@ -439,7 +597,8 @@ def _save_inference_ckpt(args, rank, world_size, num_samples, completed_batches,
     finally:
         os.close(dir_fd)
 
-def _load_inference_ckpt(args, rank, world_size, num_samples, err_agg_list):
+def _load_inference_ckpt(args, rank, world_size, num_samples, err_agg_list,
+                         embed_metric_agg = None):
     """Restore accumulated errors from a previous run and return the number of already
     completed batches (0 if there is no usable checkpoint)."""
     path = _inference_ckpt_path(args, rank)
@@ -459,6 +618,16 @@ def _load_inference_ckpt(args, rank, world_size, num_samples, err_agg_list):
         )
     for metric_idx, metric in enumerate(args.eval_metric):
         _merge_state_into_err_agg(err_agg_list[metric_idx], payload["metrics"][metric])
+    # === EMBEDDING EXTRACTION ===
+    if embed_metric_agg is not None:
+        embed_state = payload.get("embedding_metrics")
+        if embed_state is None:
+            raise RuntimeError(
+                f"Inference checkpoint at {path} holds no embedding metrics, but this run "
+                f"computes them; resuming would drop the already-processed batches from the "
+                f"average. Delete the file to start fresh, or drop --resume_inference."
+            )
+        _merge_embed_metrics_state(embed_metric_agg, embed_state)
     completed = int(payload.get("completed_batches", 0))
     logger.info(
         "[rank %s] Resuming inference from %s: %s batch(es) already completed.",
@@ -1159,7 +1328,8 @@ def evaluate(
     rank = 0,
     metadata_dataset = None,
     world_size = 1,
-    embed_hook_buf = None,   # === EMBEDDING EXTRACTION ===
+    embed_hook_buf = None,       # === EMBEDDING EXTRACTION ===
+    embed_metric_agg = None,     # === EMBEDDING EXTRACTION ===
 ):
     model.eval()
     ds_ref = metadata_dataset if metadata_dataset is not None else dataloader.dataset
@@ -1168,8 +1338,25 @@ def evaluate(
     static_data = ds_ref.get_static_vars_ds()
 
     # === EMBEDDING EXTRACTION ===
-    embedding_enabled = embed_hook_buf is not None and args.embedding_output_dir
-    if embedding_enabled:
+    # Two independent consumers of the hooked bottleneck tokens: the .npz dump (npz_enabled)
+    # and the on-the-fly distance metrics (metrics_enabled). `embedding_enabled` means "capture
+    # tokens at all"; `embedding_save_steps` is the union of the steps either one asks for.
+    npz_enabled = embed_hook_buf is not None and bool(args.embedding_output_dir)
+    metrics_enabled = (
+        embed_hook_buf is not None
+        and bool(args.embedding_metrics_output_dir)
+        and embed_metric_agg is not None
+    )
+    embedding_enabled = npz_enabled or metrics_enabled
+    embed_dtype = None
+    embed_gt_loader = None
+    embedding_save_steps = set()
+
+    if npz_enabled:
+        # Only the .npz path builds ground-truth batches through plot_embedding_distance's
+        # build_batch(), which hardcodes atmos_levels from that module's own LEVELS. The metric
+        # path builds its ground-truth window from the rollout's own ERA5 targets and tags it
+        # with `levels` from the dataset, so it is not exposed to this mismatch.
         if list(args.levels) != list(_EMBED_GT_LEVELS):
             raise ValueError(
                 f"--levels {list(args.levels)} does not match plot_embedding_distance.py's "
@@ -1177,20 +1364,32 @@ def evaluate(
                 f"ground-truth embeddings with the wrong atmos_levels. Update LEVELS in "
                 f"plot_embedding_distance.py to match, or drop --embedding_output_dir."
             )
-        embedding_save_steps = set(args.embedding_save_steps or args.save_rollout_step or [])
+        npz_save_steps = set(args.embedding_save_steps or args.save_rollout_step or [])
+        embedding_save_steps |= npz_save_steps
         embed_gt_loader = SnapshotLoader(ds_ref)
         embed_dtype = _EMBED_DTYPES[args.embedding_dtype]
         Path(args.embedding_output_dir).mkdir(parents = True, exist_ok = True)
-        if not embedding_save_steps:
+        if not npz_save_steps:
             logger.warning(
                 "[embedding] --embedding_output_dir is set but no save steps were resolved "
                 "(neither --embedding_save_steps nor --save_rollout_step given); no embeddings "
                 "will be extracted."
             )
     else:
-        embedding_save_steps = set()
-        embed_gt_loader = None
-        embed_dtype = None
+        npz_save_steps = set()
+
+    if metrics_enabled:
+        # Every rollout step, unless the user narrowed it explicitly. Nothing is stored per
+        # step beyond a running sum, so "all steps" is the useful default here.
+        metric_save_steps = set(args.embedding_save_steps or range(1, args.rollout_step + 1))
+        embedding_save_steps |= metric_save_steps
+        Path(args.embedding_metrics_output_dir).mkdir(parents = True, exist_ok = True)
+        logger.info(
+            "[embedding] on-the-fly distance metrics enabled for %d rollout step(s) -> %s",
+            len(metric_save_steps), args.embedding_metrics_output_dir,
+        )
+    else:
+        metric_save_steps = set()
 
     boundary_enabled = boundary_dataset is not None and args.boundary_width > 0
     gpu_boundary_cache = {}
@@ -1230,7 +1429,10 @@ def evaluate(
     num_samples = len(dataloader.dataset)
     start_batch = 0
     if getattr(args, "resume_inference", False):
-        start_batch = _load_inference_ckpt(args, rank, world_size, num_samples, err_agg_list)
+        start_batch = _load_inference_ckpt(
+            args, rank, world_size, num_samples, err_agg_list,
+            embed_metric_agg = embed_metric_agg if metrics_enabled else None,
+        )
 
     # Optimization: Use inference_mode to reduce memory for gradients
     with torch.inference_mode():
@@ -1430,9 +1632,23 @@ def evaluate(
                 rollout_batch = _prepare_batch_for_rollout(model, _input)
 
                 # === EMBEDDING EXTRACTION ===
-                # t -> {"gt_vecs": [...], "dates": dates} until its pred-side embedding (captured
-                # for free on the FOLLOWING iteration's forward call, see below) arrives too.
+                # t -> {"gt_vecs"/"gt_tokens": ..., "dates": dates} until its pred-side embedding
+                # (captured for free on the FOLLOWING iteration's forward call, see below)
+                # arrives too.
                 pending_embeddings = {} if embedding_enabled else None
+
+                # === EMBEDDING EXTRACTION ===
+                # Ground-truth window for the metric path: [ERA5(t-1), ERA5(t)]. ERA5(t) is the
+                # loss label the rollout loop already stages on the GPU each step, and ERA5(0) is
+                # the last input frame, so the whole window comes for free -- no extra netCDF
+                # reads, unlike the .npz path's SnapshotLoader (which was written for a handful
+                # of save steps, not for every step of every init time).
+                prev_label_data = None
+                if metrics_enabled:
+                    prev_label_data = {
+                        section: {k: v[:, -1:] for k, v in inputs[section].items()}
+                        for section in ("surf_vars", "atmos_vars")
+                    }
 
                 for step_index in range(args.rollout_step):
                     # step_index starts at 0, so lead time t is step_index + 1
@@ -1472,16 +1688,10 @@ def evaluate(
                         capture_lead = t - 1
                         pending = pending_embeddings.pop(capture_lead, None)
                         if pending is not None:
-                            pred_vecs = flatten_hook_tokens(embed_hook_buf, embed_dtype, expected_batch=len(dates))
-                            for i in range(pred_vecs.shape[0]):
-                                _save_embedding_npz(
-                                    args.embedding_output_dir,
-                                    pd.Timestamp(pending["dates"][i]),
-                                    capture_lead * args.lead_time,
-                                    capture_lead,
-                                    pred_vecs[i],
-                                    pending["gt_vecs"][i],
-                                )
+                            _consume_pending_embedding(
+                                args, embed_hook_buf, embed_dtype, capture_lead, pending,
+                                embed_metric_agg,
+                            )
 
                     # 1. Get the corresponding label for this specific step
                     if args.lazy_mode:
@@ -1534,7 +1744,42 @@ def evaluate(
                     # the matching pred-side embedding for this same `t` is captured for free on the
                     # NEXT loop iteration's forward call above (or, if `t` is the last rollout step,
                     # by the one-off fallback forward pass after the loop).
-                    if embedding_enabled and t in embedding_save_steps:
+                    #
+                    # The metric path takes its ground truth from `_label_data` instead (see
+                    # `prev_label_data` above): same ERA5 states, already on the GPU, and embedded
+                    # for the whole batch in a single forward rather than one per sample.
+                    #
+                    # It also reuses `_label.metadata.time`, i.e. pd.Timestamp, exactly like every
+                    # batch the rollout itself feeds the model. That matters: the encoder turns the
+                    # metadata time into an absolute-time feature via `t.timestamp()`
+                    # (aurora/model/encoder.py), and a naive datetime.datetime -- which
+                    # plot_embedding_distance.build_batch() produces via .to_pydatetime() -- is
+                    # interpreted in the machine's LOCAL timezone, while pd.Timestamp is treated as
+                    # UTC. Mixing the two would encode the ground truth at a different absolute
+                    # time than the prediction it is compared against (8h apart on this host).
+                    if metrics_enabled and t in metric_save_steps:
+                        gt_batch = Batch(
+                            surf_vars = {
+                                k: torch.cat([prev_label_data["surf_vars"][k], v], dim = 1)
+                                for k, v in _label_data["surf_vars"].items()
+                            },
+                            atmos_vars = {
+                                k: torch.cat([prev_label_data["atmos_vars"][k], v], dim = 1)
+                                for k, v in _label_data["atmos_vars"].items()
+                            },
+                            static_vars = static_data["static_vars"],
+                            metadata = Metadata(
+                                lat = latitudes,
+                                lon = longitude,
+                                time = _label.metadata.time,
+                                atmos_levels = levels,
+                            ),
+                        )
+                        pending_embeddings.setdefault(t, {"dates": dates})["gt_tokens"] = (
+                            _embed_window_batched(model, gt_batch, embed_hook_buf)
+                        )
+
+                    if npz_enabled and t in npz_save_steps:
                         gt_vecs = []
                         for i in range(len(dates)):
                             prev_time_i = pd.Timestamp(dates[i]) + pd.Timedelta(hours = (t - 1) * args.lead_time)
@@ -1559,7 +1804,13 @@ def evaluate(
                                 curr_time_i,
                             )
                             gt_vecs.append(_embed_window(model, gt_batch_i, embed_hook_buf, embed_dtype)[0])
-                        pending_embeddings[t] = {"gt_vecs": gt_vecs, "dates": dates}
+                        pending_embeddings.setdefault(t, {"dates": dates})["gt_vecs"] = gt_vecs
+
+                    # === EMBEDDING EXTRACTION ===
+                    # This step's ERA5 target becomes the older half of the next step's
+                    # ground-truth window.
+                    if metrics_enabled:
+                        prev_label_data = _label_data
 
                     # Determine slice width for error calculation
                     # slice_width = args.boundary_width
@@ -1659,12 +1910,12 @@ def evaluate(
                 # boundary-conditioned state to fall back to.
                 if embedding_enabled and pending_embeddings:
                     for t_left, pending in pending_embeddings.items():
-                        logger.warning(
-                            "[embedding] lead %sh: final rollout step has no next-iteration "
-                            "forward pass; doing one extra plain (non-boundary-conditioned) "
-                            "forward to capture its prediction embedding.",
-                            t_left * args.lead_time,
-                        )
+                        # logger.warning(
+                        #     "[embedding] lead %sh: final rollout step has no next-iteration "
+                        #     "forward pass; doing one extra plain (non-boundary-conditioned) "
+                        #     "forward to capture its prediction embedding.",
+                        #     t_left * args.lead_time,
+                        # )
                         # See the matching comment above (ground-truth extraction): avoid
                         # overlapping this extra forward with any in-flight lazy-mode background
                         # copy-stream work.
@@ -1673,16 +1924,9 @@ def evaluate(
                         embed_hook_buf.clear()
                         with torch.no_grad():
                             _ = model(rollout_batch)
-                        pred_vecs = flatten_hook_tokens(embed_hook_buf, embed_dtype, expected_batch=len(dates))
-                        for i in range(pred_vecs.shape[0]):
-                            _save_embedding_npz(
-                                args.embedding_output_dir,
-                                pd.Timestamp(pending["dates"][i]),
-                                t_left * args.lead_time,
-                                t_left,
-                                pred_vecs[i],
-                                pending["gt_vecs"][i],
-                            )
+                        _consume_pending_embedding(
+                            args, embed_hook_buf, embed_dtype, t_left, pending, embed_metric_agg,
+                        )
                     pending_embeddings.clear()
 
             if boundary_enabled:
@@ -1695,6 +1939,7 @@ def evaluate(
             _label_list = None
             _input = None
             rollout_batch = None
+            prev_label_data = None  # === EMBEDDING EXTRACTION ===
             if prefetched_boundary is not None:
                 prefetched_boundary.clear()
             if lazy_target_futures is not None:
@@ -1708,6 +1953,7 @@ def evaluate(
             # err_agg_list, so record it as completed. Atomic write (see helper).
             _save_inference_ckpt(
                 args, rank, world_size, num_samples, batch_idx + 1, err_agg_list,
+                embed_metric_agg = embed_metric_agg if metrics_enabled else None,
             )
 
     if lazy_prefetch_executor is not None:
@@ -1764,6 +2010,54 @@ def export_agg_to_csv(
     df.to_csv(out_path)
     return df
 
+def export_embedding_metrics(args, embed_metric_agg, out_dir, label, init_time_desc):
+    """=== EMBEDDING EXTRACTION ===
+    Average the running sums over init times, write embedding_distance.csv, and draw the same
+    figures plot_embedding_distance.py draws (reusing its make_plots, so the two stay in sync).
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents = True, exist_ok = True)
+
+    rows = []
+    for lead_hours in sorted(embed_metric_agg.keys()):
+        entry = embed_metric_agg[lead_hours]
+        n = entry["count"]
+        if n == 0:
+            continue
+        rows.append({
+            "label": label,
+            "lead_time": lead_hours,
+            "n": n,
+            **{k: entry[k] / n for k in _EMBED_METRIC_KEYS},
+        })
+
+    if not rows:
+        logger.warning(
+            "[embedding] no embedding metrics were accumulated; nothing written to %s", out_dir,
+        )
+        return None
+
+    df = pd.DataFrame(rows)
+    csv_path = out_dir / "embedding_distance.csv"
+    df.drop(columns = ["label"]).to_csv(csv_path, index = False)
+    logger.info("[embedding] wrote %s (%d lead times)", csv_path, len(df))
+
+    # make_plots() reads only these four attributes off `args`; mirror
+    # plot_embedding_distance.py's own argparse defaults rather than adding CLI flags here.
+    plot_args = SimpleNamespace(width = 8.0, height = 5.0, ext = "png", dpi = 150)
+    make_plots(df, [label], plot_args, out_dir, init_time_desc)
+    logger.info("[embedding] wrote plots to %s", out_dir)
+    return df
+
+
+def _embedding_metrics_label(args):
+    return args.embedding_metrics_label or Path(args.embedding_metrics_output_dir).name
+
+
+def _embedding_init_time_desc(args, num_init_times):
+    return f"{args.start_date_hour} .. {args.end_date_hour} ({num_init_times} init times)"
+
+
 def _mp_worker_entry(rank, world_size, args, cuda_available):
     # Restrict this process to its single assigned physical GPU BEFORE any CUDA API
     # call. CUDA_VISIBLE_DEVICES is inherited from the parent shell (all GPUs), so
@@ -1797,8 +2091,12 @@ def _mp_worker_entry(rank, world_size, args, cuda_available):
 
     # === EMBEDDING EXTRACTION ===
     embed_hook_handle, embed_hook_buf = (None, None)
-    if args.embedding_output_dir:
+    if _embedding_features_enabled(args):
         embed_hook_handle, embed_hook_buf = attach_swin_output_hook(model)
+    embed_metric_agg = (
+        _new_embed_metric_agg(args.rollout_step, args.lead_time)
+        if args.embedding_metrics_output_dir else None
+    )
 
     full_dataset = create_dataset(args)
     eval_dataset = _manual_split_dataset(full_dataset, rank, world_size)
@@ -1825,7 +2123,8 @@ def _mp_worker_entry(rank, world_size, args, cuda_available):
         rank = rank,
         metadata_dataset = full_dataset,
         world_size = world_size,
-        embed_hook_buf = embed_hook_buf,  # === EMBEDDING EXTRACTION ===
+        embed_hook_buf = embed_hook_buf,      # === EMBEDDING EXTRACTION ===
+        embed_metric_agg = embed_metric_agg,  # === EMBEDDING EXTRACTION ===
     )
 
     # === EMBEDDING EXTRACTION ===
@@ -1841,6 +2140,9 @@ def _mp_worker_entry(rank, world_size, args, cuda_available):
             metric: _err_agg_to_state(err_agg)
             for metric, err_agg in zip(args.eval_metric, err_agg_list)
         },
+        # === EMBEDDING EXTRACTION === this rank's share of the init times; main() merges the
+        # per-rank sums before averaging, so the result does not depend on the world size.
+        "embedding_metrics": _embed_metrics_to_state(embed_metric_agg) if embed_metric_agg is not None else None,
     }
     with out_path.open("w", encoding = "utf-8") as f:
         json.dump(payload, f)
@@ -1875,8 +2177,12 @@ def main():
 
         # === EMBEDDING EXTRACTION ===
         embed_hook_handle, embed_hook_buf = (None, None)
-        if args.embedding_output_dir:
+        if _embedding_features_enabled(args):
             embed_hook_handle, embed_hook_buf = attach_swin_output_hook(model)
+        embed_metric_agg = (
+            _new_embed_metric_agg(args.rollout_step, args.lead_time)
+            if args.embedding_metrics_output_dir else None
+        )
 
         dataset = create_dataset(args)
         # Pass the model's 0.25deg grid so a low-res boundary is regridded onto it in the loader.
@@ -1896,12 +2202,21 @@ def main():
             rank = 0,
             metadata_dataset = dataset,
             world_size = 1,
-            embed_hook_buf = embed_hook_buf,  # === EMBEDDING EXTRACTION ===
+            embed_hook_buf = embed_hook_buf,      # === EMBEDDING EXTRACTION ===
+            embed_metric_agg = embed_metric_agg,  # === EMBEDDING EXTRACTION ===
         )
 
         # === EMBEDDING EXTRACTION ===
         if embed_hook_handle is not None:
             embed_hook_handle.remove()
+        if embed_metric_agg is not None:
+            export_embedding_metrics(
+                args,
+                embed_metric_agg,
+                args.embedding_metrics_output_dir,
+                _embedding_metrics_label(args),
+                _embedding_init_time_desc(args, len(dataset)),
+            )
 
         for metric, err_agg in zip(args.eval_metric, err_agg_list):
             if args.csv_output_folder is not None:
@@ -1934,6 +2249,11 @@ def main():
 
     full_dataset = create_dataset(args)
     _, merged_err_agg_list = _build_metric_lists(args, total_count = len(full_dataset))
+    # === EMBEDDING EXTRACTION ===
+    merged_embed_metric_agg = (
+        _new_embed_metric_agg(args.rollout_step, args.lead_time)
+        if args.embedding_metrics_output_dir else None
+    )
     tmp_root = Path(args.csv_output_folder) if args.csv_output_folder is not None else Path(args.gen_result_folder)
     for rank in range(world_size):
         p = tmp_root / f".mp_rank_{rank}_metrics.json"
@@ -1941,7 +2261,19 @@ def main():
             payload = json.load(f)
         for metric_idx, metric in enumerate(args.eval_metric):
             _merge_state_into_err_agg(merged_err_agg_list[metric_idx], payload["metrics"][metric])
+        if merged_embed_metric_agg is not None:
+            _merge_embed_metrics_state(merged_embed_metric_agg, payload["embedding_metrics"])
         p.unlink(missing_ok = True)
+
+    # === EMBEDDING EXTRACTION ===
+    if merged_embed_metric_agg is not None:
+        export_embedding_metrics(
+            args,
+            merged_embed_metric_agg,
+            args.embedding_metrics_output_dir,
+            _embedding_metrics_label(args),
+            _embedding_init_time_desc(args, len(full_dataset)),
+        )
 
     for metric, err_agg in zip(args.eval_metric, merged_err_agg_list):
         if args.csv_output_folder is not None:
