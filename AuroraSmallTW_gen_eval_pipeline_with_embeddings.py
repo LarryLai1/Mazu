@@ -1317,6 +1317,95 @@ def _lazy_produce_target(ds_ref, dates, step, device, copy_stream):
         event = copy_stream.record_event()
     return out, event
 
+def _produce_boundary_step(
+    boundary_dataset,
+    mode,
+    source_cache,
+    base_times,
+    dates,
+    k,
+    input_time_window,
+    timestep_hours,
+    lead_time,
+    flip_lat,
+    flip_lon,
+    device,
+    copy_stream,
+    cache_ready_event,
+):
+    """
+    Runs on the boundary-prefetch worker thread: produce ONE rollout step's boundary batch.
+
+    Same sliding-window contract as _lazy_produce_target (see there), one "unit" being one
+    rollout step's boundary for the whole batch -- but on its own thread and its own CUDA
+    stream, because a boundary unit is both bigger (an extra [B, T, ...] time-window axis and
+    the boundary_width-extended grid) and produced on a different cadence than a target: the
+    boundary for rollout index k is consumed at the TOP of step k (before the forward pass),
+    whereas target t is consumed after it.
+
+    `mode` selects where the data comes from, mirroring the three original prefetch paths:
+      "forecast_source" / "gpu_cache" -- slice+interpolate out of the GPU-resident per-cycle
+          source in `source_cache` (no disk I/O at all; pure GPU work on `copy_stream`),
+      "plain"                         -- read netCDF per target time (under NETCDF_IO_LOCK,
+          since the target worker and the main thread also touch HDF5) and stage H2D through
+          pinned buffers on `copy_stream`.
+
+    The T time-steps of the returned [B, T, ...] tensors correspond to offsets (in hours from
+    date): [ k*lead_time - (W-1)*timestep_hours, ..., k*lead_time ], W = input_time_window.
+    For historical steps the offset can be negative; boundary_dataset handles that by falling
+    back to the previous forecast cycle.
+
+    Returns (boundary_dict_or_None, event). The event is recorded on copy_stream and the main
+    thread must wait on it (on the compute stream) before using the tensors; it is None for a
+    CPU device. A None boundary dict means the requested time is unavailable (e.g. "exact"
+    mode with no matching lead time) -- same signal the eager path produced.
+    """
+    def _build():
+        single_steps = []
+        for tw in range(input_time_window - 1, -1, -1):  # W-1 down to 0 (oldest -> newest)
+            offset_hours = k * lead_time - tw * timestep_hours
+            target_times_k = tuple(
+                pd.Timestamp(d) + pd.Timedelta(hours = offset_hours)
+                for d in dates
+            )
+            if mode == "forecast_source":
+                b_single = _build_boundary_batch_from_hres_source(
+                    boundary_dataset, source_cache, base_times, target_times_k,
+                )
+            elif mode == "gpu_cache":
+                b_single = _build_boundary_batch_from_gpu_cache(
+                    boundary_dataset, source_cache, base_times, target_times_k,
+                )
+            else:
+                b_single = _build_boundary_batch(boundary_dataset, base_times, target_times_k)
+            b_single = _align_boundary_batch(b_single, flip_lat, flip_lon)
+            if mode == "plain" and b_single is not None:
+                # Only this path starts on the host: stage through pinned buffers so the H2D
+                # is a true async DMA overlapping with model compute (the two cache-backed
+                # paths are already GPU-resident and never touch the host).
+                for section in ("surf_vars", "atmos_vars"):
+                    for var_name, tensor in b_single[section].items():
+                        b_single[section][var_name] = (
+                            tensor.pin_memory().to(device, non_blocking = True)
+                            if copy_stream is not None
+                            else tensor.to(device)
+                        )
+            single_steps.append(b_single)
+        return _stack_boundary_time_window(single_steps)
+
+    if copy_stream is None:
+        # CPU device (or no async path): no stream/event needed.
+        return _build(), None
+
+    with torch.cuda.stream(copy_stream):
+        # The per-cycle source cache is populated on the main thread at the start of each
+        # batch; make this stream wait for those H2D copies before reading them.
+        if cache_ready_event is not None:
+            copy_stream.wait_event(cache_ready_event)
+        out = _build()
+        event = copy_stream.record_event()
+    return out, event
+
 def evaluate(
     args,
     model,
@@ -1409,19 +1498,35 @@ def evaluate(
         flip_lat = False
         flip_lon = False
 
-    # Lazy-mode GPU prefetch machinery:
-    #  - a single background thread reads target t+n-1 from disk and enqueues its H2D copy,
-    #  - a dedicated CUDA copy stream runs those transfers so they overlap with model
-    #    compute on the default stream and targets t..t+n-1 stay GPU-resident,
-    #  - CUDA events synchronise the compute stream against each target's copy completion.
+    # GPU prefetch machinery, used by two independent sliding windows (targets and boundaries):
+    #  - a single background thread produces the next unit (disk read and/or GPU-side slice)
+    #    and enqueues its work on a dedicated CUDA stream, so it overlaps with model compute
+    #    on the default stream while the window's units stay GPU-resident,
+    #  - CUDA events synchronise the compute stream against each unit's completion.
+    #
+    # Targets and boundaries get a thread and a stream EACH: a "unit" is one rollout step for
+    # both, but they are consumed at different points of the step (boundary before the forward
+    # pass, target after it) and a boundary unit takes longer to produce, so sharing one worker
+    # would serialise the two and let the slower one stall the faster one. The window DEPTH is
+    # shared (--lazy_prefetch_steps), so at most n targets and n boundaries live on the GPU.
+    from concurrent.futures import ThreadPoolExecutor
+
+    _prefetch_n = max(1, getattr(args, "lazy_prefetch_steps", 1))
+
     lazy_prefetch_executor = None
     lazy_copy_stream = None
     if args.lazy_mode:
-        from concurrent.futures import ThreadPoolExecutor
         # One worker is enough: it only needs to produce a single new target (t+n-1) per step.
         lazy_prefetch_executor = ThreadPoolExecutor(max_workers = 1)
         if device.type == "cuda":
             lazy_copy_stream = torch.cuda.Stream(device = device)
+
+    boundary_prefetch_executor = None
+    boundary_copy_stream = None
+    if boundary_enabled:
+        boundary_prefetch_executor = ThreadPoolExecutor(max_workers = 1)
+        if device.type == "cuda":
+            boundary_copy_stream = torch.cuda.Stream(device = device)
 
     # --- Inference-progress checkpoint (always-on) ---
     # Restore accumulated errors and the completed-batch count so a killed run can resume.
@@ -1473,124 +1578,90 @@ def evaluate(
             if boundary_enabled:
                 base_times = tuple(boundary_dataset.get_base_time(t) for t in batch_times)
 
-            # Prefetch boundary data for all autoregressive steps and transfer to device.
-            # For input_time_window > 1, each entry prefetched_boundary[k] is a multi-timestep
-            # boundary with tensors of shape [B, T, ...], where T = input_time_window.
-            # The T time-steps correspond to offsets (in hours from date):
-            #   [ k*lead_time - (W-1)*timestep_hours,  ...,  k*lead_time ]
-            # where W = input_time_window.  For historical steps (k*lead_time - n*timestep_hours < 0)
-            # the target time can be negative relative to base_time — boundary_dataset is
-            # expected to handle this gracefully (analysis data that pre-dates the rollout).
+            # --- Boundary GPU-prefetch window setup (per batch) ---
+            # Boundaries used to be materialised for ALL rollout steps up front, which put
+            # (rollout_step + 1) units on the GPU at once — linear in lead time, and by far the
+            # largest allocation in the run. They are now produced through the same sliding
+            # window as the targets (depth n = --lazy_prefetch_steps), on their own worker
+            # thread and CUDA stream, so at most n boundary units are resident at any time
+            # regardless of rollout_step. Each unit prefetched_boundary[k] is a multi-timestep
+            # boundary with tensors of shape [B, T, ...], where T = input_time_window; see
+            # _produce_boundary_step for the time-offset convention.
+            #
+            # What stays eager is the per-cycle SOURCE cache: it is O(1) in rollout_step (a
+            # couple of forecast cycles per batch), it is what makes the windowed units cheap
+            # to build (pure GPU slicing, no disk I/O), and loading it here on the main thread
+            # keeps its netCDF reads off both worker threads.
             prefetched_boundary = None
+            boundary_futures = None
+            boundary_mode = None
+            boundary_source_cache = None
+            _boundary_cache_event = None
             if boundary_enabled and args.replace_boundary_position != []:
                 prefetched_boundary = {}
+                boundary_futures = {}
                 _input_tw = getattr(args, 'input_time_window', 1)
                 _ts_hours = getattr(args, 'timestep_hours', 6)
 
                 if boundary_uses_forecast_source:
-                    source_cache = gpu_boundary_cache if args.gpu_cache else {}
-                    hist_cycle = getattr(boundary_dataset, "forecast_cycle_hours", 12)
-                    for base_time in set(base_times):
-                        _get_boundary_source_on_device(
-                            boundary_dataset,
-                            base_time,
-                            source_cache,
-                            device,
-                        )
-                        _get_boundary_source_on_device(
-                            boundary_dataset,
-                            base_time - pd.Timedelta(hours = hist_cycle),
-                            source_cache,
-                            device,
-                        )
-                    for k in range(0, args.rollout_step + 1):
-                        # Collect W single-step batches (oldest → newest)
-                        single_steps = []
-                        for tw in range(_input_tw - 1, -1, -1):  # W-1 down to 0
-                            offset_hours = k * args.lead_time - tw * _ts_hours
-                            target_times_k = tuple(
-                                pd.Timestamp(d) + pd.Timedelta(hours=offset_hours)
-                                for d in dates
-                            )
-                            b_single = _build_boundary_batch_from_hres_source(
-                                boundary_dataset,
-                                source_cache,
-                                base_times,
-                                target_times_k,
-                            )
-                            b_single = _align_boundary_batch(b_single, flip_lat, flip_lon)
-                            single_steps.append(b_single)
-                        prefetched_boundary[k] = _stack_boundary_time_window(single_steps)
-
+                    boundary_mode = "forecast_source"
+                    boundary_source_cache = gpu_boundary_cache if args.gpu_cache else {}
                 elif args.gpu_cache:
+                    boundary_mode = "gpu_cache"
+                    boundary_source_cache = gpu_boundary_cache
+                else:
+                    boundary_mode = "plain"
+
+                if boundary_source_cache is not None:
                     hist_cycle = getattr(boundary_dataset, "forecast_cycle_hours", 12)
                     for base_time in set(base_times):
                         _get_boundary_source_on_device(
                             boundary_dataset,
                             base_time,
-                            gpu_boundary_cache,
+                            boundary_source_cache,
                             device,
                         )
                         _get_boundary_source_on_device(
                             boundary_dataset,
                             base_time - pd.Timedelta(hours = hist_cycle),
-                            gpu_boundary_cache,
+                            boundary_source_cache,
                             device,
                         )
-                    # include initial step k=0 (current time) and future steps 1..rollout_step
-                    for k in range(0, args.rollout_step + 1):
-                        single_steps = []
-                        for tw in range(_input_tw - 1, -1, -1):
-                            offset_hours = k * args.lead_time - tw * _ts_hours
-                            target_times_k = tuple(
-                                pd.Timestamp(d) + pd.Timedelta(hours=offset_hours)
-                                for d in dates
-                            )
-                            b_single = _build_boundary_batch_from_gpu_cache(
-                                boundary_dataset,
-                                gpu_boundary_cache,
-                                base_times,
-                                target_times_k,
-                            )
-                            b_single = _align_boundary_batch(b_single, flip_lat, flip_lon)
-                            single_steps.append(b_single)
-                        prefetched_boundary[k] = _stack_boundary_time_window(single_steps)
+                    # The worker's stream must not read the cache before these H2D copies land.
+                    if device.type == "cuda":
+                        _boundary_cache_event = torch.cuda.current_stream().record_event()
 
-                else:
-                    # include initial step k=0 (current time) and future steps 1..rollout_step
-                    for k in range(0, args.rollout_step + 1):
-                        single_steps = []
-                        for tw in range(_input_tw - 1, -1, -1):
-                            offset_hours = k * args.lead_time - tw * _ts_hours
-                            target_times_k = tuple(
-                                pd.Timestamp(d) + pd.Timedelta(hours=offset_hours)
-                                for d in dates
-                            )
-                            b_single = _build_boundary_batch(boundary_dataset, base_times, target_times_k)
-                            b_single = _align_boundary_batch(b_single, flip_lat, flip_lon)
-                            # Move to device to avoid host->device during rollout
-                            if b_single is not None:
-                                for var_name, tensor in b_single["surf_vars"].items():
-                                    b_single["surf_vars"][var_name] = tensor.to(device)
-                                for var_name, tensor in b_single["atmos_vars"].items():
-                                    b_single["atmos_vars"][var_name] = tensor.to(device)
-                            single_steps.append(b_single)
-                        prefetched_boundary[k] = _stack_boundary_time_window(single_steps)
+                def _submit_boundary(k):
+                    if k in boundary_futures or k >= args.rollout_step:
+                        return
+                    boundary_futures[k] = boundary_prefetch_executor.submit(
+                        _produce_boundary_step,
+                        boundary_dataset, boundary_mode, boundary_source_cache,
+                        base_times, dates, k, _input_tw, _ts_hours, args.lead_time,
+                        flip_lat, flip_lon, device, boundary_copy_stream, _boundary_cache_event,
+                    )
+
+                # Prime the window with units 0..n-2, mirroring the target window: inside the
+                # rollout loop step k then submits only k+n-1, holding the window at n. Unit k
+                # is consumed at the TOP of step k (before the forward pass) rather than after
+                # it, so the priming is offset by one relative to the target window — which is
+                # exactly why the two cannot share a worker thread.
+                for _k in range(0, min(_prefetch_n - 1, args.rollout_step)):
+                    _submit_boundary(_k)
 
             # --- Lazy GPU-prefetch window setup (per batch) ---
             # Keep up to n targets in flight (t..t+n-1), each read on the worker thread and
             # staged onto the GPU via the copy stream. Priming submits steps 1..n-1 so that
             # inside the rollout loop step t only submits step t+n-1, holding the window at n.
-            # NOTE: this must stay AFTER the boundary prefetch above — boundary loading reads
-            # netCDF files on the main thread, and the worker is guaranteed idle here (its
-            # window fully drains at the end of each batch's rollout loop). Every remaining
-            # netCDF touchpoint (worker target reads, boundary reads, prediction writes) is
+            # NOTE: this must stay AFTER the boundary source-cache load above, which reads
+            # netCDF files on the main thread while both workers are guaranteed idle (each
+            # window fully drains at the end of every batch's rollout loop). Every netCDF
+            # touchpoint (worker target reads, worker boundary reads, prediction writes) is
             # additionally serialised via NETCDF_IO_LOCK, since the HDF5 C library is not
             # thread-safe even across different files.
             lazy_target_futures = None
-            _lazy_n = 1
+            _lazy_n = _prefetch_n  # window depth shared with the boundary window above
             if args.lazy_mode:
-                _lazy_n = max(1, getattr(args, "lazy_prefetch_steps", 1))
                 lazy_target_futures = {}
                 for _s in range(1, min(_lazy_n - 1, args.rollout_step) + 1):
                     lazy_target_futures[_s] = lazy_prefetch_executor.submit(
@@ -1655,7 +1726,28 @@ def evaluate(
                     t = step_index + 1
 
                     if boundary_enabled:
-                        b_curr = prefetched_boundary[step_index]
+                        # --- BOUNDARY GPU PREFETCH ---
+                        # Kick off the newest unit of the window (step_index + n - 1) so the
+                        # worker produces it while this step computes, then consume unit
+                        # step_index, which was submitted n-1 steps ago and is by now
+                        # already / almost GPU-resident. The window stays at n units in flight
+                        # regardless of rollout_step -- this is what used to be
+                        # (rollout_step + 1) units materialised up front.
+                        _submit_boundary(step_index + _prefetch_n - 1)
+                        # .result() only blocks until the worker finished ENQUEUING its stream
+                        # work; completion is synchronised on the GPU via the event below.
+                        b_curr, _b_event = boundary_futures.pop(step_index).result()
+                        if _b_event is not None:
+                            # Make the compute (default) stream wait for the boundary work to
+                            # complete, and tell the caching allocator the default stream now
+                            # uses these tensors (they were allocated on the boundary stream)
+                            # so they are not freed early.
+                            torch.cuda.current_stream().wait_event(_b_event)
+                            if b_curr is not None:
+                                for _section in ("surf_vars", "atmos_vars"):
+                                    for _k_var in b_curr[_section]:
+                                        b_curr[_section][_k_var].record_stream(torch.cuda.current_stream())
+                        prefetched_boundary[step_index] = b_curr
 
                         # b_curr tensors already have shape [B, T, ...] where T = input_time_window
                         # (stacked by _stack_boundary_time_window during prefetch).
@@ -1929,6 +2021,18 @@ def evaluate(
                         )
                     pending_embeddings.clear()
 
+            # Drain any boundary unit still in flight BEFORE dropping the source cache it
+            # reads from. The window normally empties itself (the last submit is capped at
+            # rollout_step - 1), so this is a no-op except on an early exit from the loop.
+            if boundary_futures:
+                for _f in boundary_futures.values():
+                    _f.result()
+                boundary_futures.clear()
+            if device.type == "cuda" and boundary_copy_stream is not None:
+                # The worker's stream may still hold the last unit's tensors; let it finish
+                # before empty_cache() below hands their blocks back to the driver.
+                boundary_copy_stream.synchronize()
+
             if boundary_enabled:
                 gpu_boundary_cache.clear()
 
@@ -1958,6 +2062,8 @@ def evaluate(
 
     if lazy_prefetch_executor is not None:
         lazy_prefetch_executor.shutdown(wait = True)
+    if boundary_prefetch_executor is not None:
+        boundary_prefetch_executor.shutdown(wait = True)
 
 def export_agg_to_csv(
         args,
