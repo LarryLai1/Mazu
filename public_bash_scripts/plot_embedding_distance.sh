@@ -19,13 +19,23 @@ boundary_smooth_mode="no"
 boundary_smooth_width_adjustment=0
 boundary_time_interp_mode="nearest"
 replace_boundary_position="backbone"
-boundary_resolution="0.25"
 # Only consulted below 0.25deg; kept here because it is part of the run-config name.
 boundary_lowres_apply_mode="direct"
 
-# The two compared configurations: baseline first, then boundary replacement.
-boundary_widths=(0 8)
-config_labels=("baseline" "boundary replacement (w8)")
+# Resolution used for the baseline (width 0, so it does not actually matter) and for the
+# HRES-forecast reference curve.
+boundary_resolution="0.25"
+
+# The compared configurations: baseline first, then direct boundary replacement at each
+# resolution. Index-aligned arrays.
+# boundary_widths=(0 8 8 8)
+# boundary_resolutions=("0.25" "0.25" "0.5" "1.5")
+# config_labels=("baseline" "boundary replacement (w8, 0.25deg)" "boundary replacement (w8, 0.5deg)" 
+#                 "boundary replacement (w8, 1.5deg)")
+boundary_widths=(8 8 8)
+boundary_resolutions=("0.25" "0.5" "1.5")
+config_labels=("boundary replacement (w8, 0.25deg)" "boundary replacement (w8, 0.5deg)" 
+                "boundary replacement (w8, 1.5deg)")
 
 MODEL_CKPT_PATH="/tmp2/yuanlim0919/lateral_smooth/model_weights/Aurora/model.safetensors"
 DATA_ROOT_DIR="/work/yunye0121/era5_tw"
@@ -40,14 +50,27 @@ if [[ "${RESUME_INFERENCE:-}" == "1" || "${RESUME_INFERENCE:-}" == "true" ]]; th
     resume_args=("--resume_inference")
 fi
 
+# Runs whose embedding_distance.csv already exists are reused instead of recomputed.
+# Set FORCE_RECOMPUTE=1 to redo everything.
+force_recompute=0
+if [[ "${FORCE_RECOMPUTE:-}" == "1" || "${FORCE_RECOMPUTE:-}" == "true" ]]; then
+    force_recompute=1
+fi
+
 run_dirs=()
 
 for i in "${!boundary_widths[@]}"; do
     boundary_width="${boundary_widths[$i]}"
-    RUN_CONFIG_SUFFIX="${boundary_source}_boundary${boundary_width}_${replace_boundary_position}_res${boundary_resolution}_${boundary_time_interp_mode}"
+    run_resolution="${boundary_resolutions[$i]}"
+    RUN_CONFIG_SUFFIX="${boundary_source}_boundary${boundary_width}_${replace_boundary_position}_res${run_resolution}_${boundary_time_interp_mode}"
     EMBEDDING_METRICS_DIR="${EMBEDDING_OUTPUT_ROOT}/embedding_distance/${RUN_CONFIG_SUFFIX}"
     mkdir -p "${EMBEDDING_METRICS_DIR}"
     run_dirs+=("${EMBEDDING_METRICS_DIR}")
+
+    if [[ ${force_recompute} -eq 0 && -s "${EMBEDDING_METRICS_DIR}/embedding_distance.csv" ]]; then
+        echo "=== skip (already computed): ${config_labels[$i]} -- ${RUN_CONFIG_SUFFIX} ==="
+        continue
+    fi
 
     echo "=== embedding distance: ${config_labels[$i]} -- ${RUN_CONFIG_SUFFIX} (${start_time} .. ${end_time}, ${rollout_step} leads) ==="
 
@@ -80,12 +103,10 @@ for i in "${!boundary_widths[@]}"; do
         --boundary_smooth_width_adjustment ${boundary_smooth_width_adjustment} \
         --boundary_time_interp_mode "${boundary_time_interp_mode}" \
         --replace_boundary_position "${replace_boundary_position}" \
-        --boundary_resolution "${boundary_resolution}" \
+        --boundary_resolution "${run_resolution}" \
         --boundary_lowres_apply_mode "${boundary_lowres_apply_mode}" \
         --gpu_cache \
         --eval_metric MSE \
-        --csv_output_folder "${EMBEDDING_METRICS_DIR}/run" \
-        --gen_result_folder "${EMBEDDING_METRICS_DIR}/run" \
         --gpus "${CUDA_VISIBLE_DEVICES}" \
         --lazy_mode \
         --lazy_prefetch_steps 2 \
@@ -96,24 +117,16 @@ for i in "${!boundary_widths[@]}"; do
     echo "wrote ${EMBEDDING_METRICS_DIR}/embedding_distance.csv"
 done
 
-# --- HRES forecast baseline --------------------------------------------------------------
-# The ECMWF HRES trajectory vs. the same ERA5 ground truth. There is no rollout to hook here, so
-# it is computed separately: both sides go straight through utils.embedding.encode_batch (the
-# pre-encoder + encoder + backbone encoder layers, stopping at the bottleneck), batched over init
-# times on the GPU. Two encoder passes per (batch, lead) instead of a full forward, so this is
-# far quicker than the rollouts above.
-#
-# Sampling mode for HRES's 6-hourly steps at these hourly leads. It follows the rollout runs by
-# default so all three lines see the same HRES data. Set it to "interpolation" if you would rather
-# the two history slots of the HRES window always differ: at "nearest", leads one hour apart
-# frequently snap to the same 6-hourly forecast step, so the HRES window becomes [X, X] while the
-# ERA5 window it is compared against holds two distinct states.
 hres_baseline_time_interp_mode="${boundary_time_interp_mode}"
 
 HRES_METRICS_DIR="${EMBEDDING_OUTPUT_ROOT}/embedding_distance/hres_forecast_res${boundary_resolution}_${hres_baseline_time_interp_mode}"
 mkdir -p "${HRES_METRICS_DIR}"
 run_dirs+=("${HRES_METRICS_DIR}")
 config_labels+=("HRES forecast")
+
+if [[ ${force_recompute} -eq 0 && -s "${HRES_METRICS_DIR}/embedding_distance.csv" ]]; then
+    echo "=== skip (already computed): HRES forecast -- $(basename "${HRES_METRICS_DIR}") ==="
+else
 
 echo "=== embedding distance: HRES forecast -- $(basename "${HRES_METRICS_DIR}") (${start_time} .. ${end_time}, ${rollout_step} leads) ==="
 
@@ -126,7 +139,7 @@ python ./compute_hres_embedding_distance.py \
     --end_date_hour "${end_time}" \
     --rollout_step ${rollout_step} \
     --lead_time 1 \
-    --batch_size ${batch_size} \
+    --batch_size 32 \
     --surface_variables t2m u10 v10 msl \
     --upper_variables u v t q z \
     --static_variables lsm slt z \
@@ -138,10 +151,13 @@ python ./compute_hres_embedding_distance.py \
     --boundary_time_interp_mode "${hres_baseline_time_interp_mode}" \
     --boundary_resolution "${boundary_resolution}" \
     --boundary_lowres_apply_mode "${boundary_lowres_apply_mode}" \
+    --gpus "${CUDA_VISIBLE_DEVICES}" \
     --output_dir "${HRES_METRICS_DIR}" \
     --label "HRES forecast"
 
 echo "wrote ${HRES_METRICS_DIR}/embedding_distance.csv"
+
+fi
 
 # --- Overlay both configurations in one figure set --------------------------------------
 # Each run above produced its own per-config CSV + PNGs; this draws them as one line per
@@ -152,4 +168,4 @@ python ./combine_embedding_distance_csv.py \
     --inputs "${run_dirs[@]}" \
     --labels "${config_labels[@]}" \
     --output_dir "${COMBINED_DIR}" \
-    --title "${start_time} .. ${end_time}, ${boundary_source} res${boundary_resolution} ${boundary_time_interp_mode}"
+    --title "${start_time} .. ${end_time}, ${boundary_source} ${boundary_lowres_apply_mode} ${boundary_time_interp_mode}"

@@ -143,7 +143,7 @@ accelerate launch --config_file ./public_bash_scripts/accelerate_training_config
     --latitude 39.75 5 \
     --longitude 100 144.75 \
     --lead_time 1 \
-    --input_time_window 1 \
+    --input_time_window 2 \
     --rollout_step 1 \
     --timestep_hours 1 \
     --use_pretrained_weight \

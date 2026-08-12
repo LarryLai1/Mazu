@@ -27,7 +27,7 @@ resols=(0.25 0.5 1.5)
 
 # Cap the highest forecast lead time shown in the plots (hours). The CSVs still hold every
 # lead time; this only trims the x-axis at draw time. Leave empty to plot all available hours.
-max_lead_hours="240"
+max_lead_hours="168"
 
 # HRES boundary forecast itself (no model), scored at each resolution in direct apply mode.
 bd_apply_mode="direct"

@@ -16,7 +16,9 @@ history slots are simply the states at `t - 1` and `t`, on both sides.
 
 Everything is batched over init times and runs on the GPU: per (batch, lead) there are exactly
 two encoder passes (HRES window + ERA5 window), and each state is read once and reused as the
-next lead's older history slot.
+next lead's older history slot. Pass --gpus to spread the init times over several GPUs, one
+process each; the per-rank sums are merged before averaging, so the result does not depend on
+how many GPUs were used.
 
 Example:
   cd Mazu
@@ -24,15 +26,19 @@ Example:
     --data_root_dir /work/yunye0121/era5_tw \
     --boundary_root_dir /tmp3/b12902101/hres_tw_forecast_0.25deg \
     --start_date_hour '2020-03-01 00:00:00' --end_date_hour '2020-03-01 23:00:00' \
-    --rollout_step 168 --batch_size 8 \
+    --rollout_step 168 --batch_size 8 --gpus 4,5,6,7 \
     --output_dir /tmp3/b12902101/mazu_embedding_output/embedding_distance/hres_forecast
 """
 
 import argparse
+import json
 import logging
+import os
+from pathlib import Path
 
 import pandas as pd
 import torch
+import torch.multiprocessing as mp
 from tqdm.auto import tqdm
 
 from aurora import Batch, Metadata
@@ -49,8 +55,10 @@ from AuroraSmallTW_gen_eval_pipeline_with_embeddings import (
     export_embedding_metrics,
     _align_boundary_batch,
     _build_boundary_batch_from_hres_source,
+    _embed_metrics_to_state,
     _get_boundary_source_on_device,
     _is_increasing,
+    _merge_embed_metrics_state,
     _new_embed_metric_agg,
     _stack_boundary_time_window,
     _update_embed_metric_agg,
@@ -108,10 +116,16 @@ def parse_args():
     p.add_argument('--bf16_mode', action='store_true')
     p.add_argument('--timestep_hours', type=int, default=1)
 
+    p.add_argument('--gpus', type=str, default=None,
+                   help='Comma-separated GPU ids, e.g. "4,5,6,7". One process per GPU, each taking '
+                        'an interleaved share of the init times. Unset runs a single process.')
+
     p.add_argument('--output_dir', type=str, required=True)
     p.add_argument('--label', type=str, default='HRES forecast')
 
-    return p.parse_args()
+    args = p.parse_args()
+    args.gpu_list = [x.strip() for x in args.gpus.split(",") if x.strip()] if args.gpus else None
+    return args
 
 
 def build_window(prev_state, curr_state, static_vars, lat, lon, valid_times, levels):
@@ -149,25 +163,30 @@ def hres_state(boundary_dataset, source_cache, base_times, target_times, flip_la
     return _align_boundary_batch(state, flip_lat, flip_lon)
 
 
-def main():
-    args = parse_args()
-    print(args)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    init_times = pd.date_range(
+def all_init_times(args):
+    return pd.date_range(
         pd.Timestamp(args.start_date_hour),
         pd.Timestamp(args.end_date_hour),
         freq=f"{args.sample_stride_hours}h",
     )
-    leads = list(range(1, args.rollout_step + 1))
-    logger.info("%d init time(s) x %d lead time(s)", len(init_times), len(leads))
 
-    # end_date_hour must cover the last valid time so the ERA5 files are in range.
+
+def compute_metrics(args, init_times, device, rank=0):
+    """Accumulate the embedding metrics for `init_times` on one device.
+
+    `init_times` is this process's share; the aggregator holds sums + counts, so merging shares
+    across processes and averaging afterwards gives exactly the single-process result.
+    """
+    all_times = all_init_times(args)
+    leads = list(range(1, args.rollout_step + 1))
+    logger.info("[rank %s] %d init time(s) x %d lead time(s)", rank, len(init_times), len(leads))
+
+    # end_date_hour must cover the last valid time so the ERA5 files are in range. Built from the
+    # full range, not this rank's share, so every rank sees an identically configured dataset.
     ds = ERA5TWDatasetforAurora(
         data_root_dir=args.data_root_dir,
-        start_date_hour=init_times[0],
-        end_date_hour=init_times[-1] + pd.Timedelta(hours=args.rollout_step * args.lead_time),
+        start_date_hour=all_times[0],
+        end_date_hour=all_times[-1] + pd.Timedelta(hours=args.rollout_step * args.lead_time),
         upper_variables=args.upper_variables,
         surface_variables=args.surface_variables,
         static_variables=args.static_variables,
@@ -200,7 +219,8 @@ def main():
     agg = _new_embed_metric_agg(args.rollout_step, args.lead_time)
 
     n_batches = (len(init_times) + args.batch_size - 1) // args.batch_size
-    for b in tqdm(range(n_batches), desc="HRES embedding distance"):
+    for b in tqdm(range(n_batches), desc=f"HRES embedding distance (rank={rank})",
+                  disable=(rank != 0)):
         batch_inits = init_times[b * args.batch_size : (b + 1) * args.batch_size]
         dates = [t.strftime("%Y-%m-%d %H:%M:%S") for t in batch_inits]
         base_times = tuple(t.floor(f"{args.forecast_cycle_hours}h") for t in batch_inits)
@@ -256,13 +276,78 @@ def main():
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-    export_embedding_metrics(
-        args,
-        agg,
-        args.output_dir,
-        args.label,
-        f"{args.start_date_hour} .. {args.end_date_hour} ({len(init_times)} init times)",
-    )
+    return agg
+
+
+# --- Multi-GPU --------------------------------------------------------------------------
+# One process per --gpus entry, each taking an interleaved share of the init times
+# (init_times[rank::world_size]) and writing its sums to a JSON the parent merges. Interleaved
+# rather than contiguous so every rank gets a comparable mix of HRES cycles, and so the total is
+# independent of how many GPUs were used.
+
+def _rank_state_path(args, rank):
+    return Path(args.output_dir) / f".mp_rank_{rank}_hres_metrics.json"
+
+
+def _mp_worker_entry(rank, world_size, args, cuda_available):
+    # Narrow this process to its own physical GPU BEFORE any CUDA API call, so no rank leaves a
+    # context on another rank's GPU (same reasoning as the rollout pipeline's worker entry).
+    if cuda_available:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_list[rank])
+    if cuda_available:
+        torch.cuda.set_device(0)
+        device = torch.device("cuda:0")
+    else:
+        device = torch.device("cpu")
+
+    init_times = all_init_times(args)[rank::world_size]
+    agg = compute_metrics(args, init_times, device, rank=rank)
+
+    path = _rank_state_path(args, rank)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump({"rank": rank, "embedding_metrics": _embed_metrics_to_state(agg)}, f)
+
+
+def main():
+    args = parse_args()
+    print(args)
+
+    init_times = all_init_times(args)
+    world_size = len(args.gpu_list) if args.gpu_list else 1
+    init_time_desc = (f"{args.start_date_hour} .. {args.end_date_hour} "
+                      f"({len(init_times)} init times)")
+
+    if world_size <= 1:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        agg = compute_metrics(args, init_times, device)
+        export_embedding_metrics(args, agg, args.output_dir, args.label, init_time_desc)
+        return
+
+    logger.info("Running on %d GPU(s): %s", world_size, ",".join(args.gpu_list))
+    # Computed in the parent so no child touches torch.cuda before narrowing its visibility.
+    cuda_available = torch.cuda.is_available()
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
+    mp_ctx = mp.get_context("spawn")
+    processes = []
+    for rank in range(world_size):
+        p = mp_ctx.Process(target=_mp_worker_entry, args=(rank, world_size, args, cuda_available))
+        p.start()
+        processes.append(p)
+    for p in processes:
+        p.join()
+        if p.exitcode != 0:
+            raise RuntimeError(f"Worker process failed with exit code {p.exitcode}.")
+
+    merged = _new_embed_metric_agg(args.rollout_step, args.lead_time)
+    for rank in range(world_size):
+        path = _rank_state_path(args, rank)
+        with path.open("r", encoding="utf-8") as f:
+            _merge_embed_metrics_state(merged, json.load(f)["embedding_metrics"])
+        path.unlink(missing_ok=True)
+
+    export_embedding_metrics(args, merged, args.output_dir, args.label, init_time_desc)
 
 
 if __name__ == "__main__":

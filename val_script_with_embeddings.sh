@@ -1,13 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-# Same as val_script.sh, but points at the embedding-extraction wrapper
-# (AuroraSmallTW_gen_eval_pipeline_with_embeddings.sh) instead of the plain rollout wrapper,
-# so Swin3D bottleneck embeddings (flattened, pred + ground truth) get extracted alongside
-# every prediction run below. Embeddings land under
-# /tmp3/b12902101/mazu_embedding_output/embeddings/<run-config>/ (outside Mazu/), tagged per
-# run config so plot_embedding_tsne_hooked.py can compare them afterwards.
-
 # LINE notification failure handler
 failure_handler() {
     local exit_code=$?
@@ -24,11 +17,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_SCRIPT="${SCRIPT_DIR}/public_bash_scripts/AuroraSmallTW_gen_eval_pipeline_with_embeddings.sh"
 
 # GPU="0,1,2,3"
-GPU="4,5,6,7"
+GPU="4,6,7"
 
-# Which rollout steps to extract embeddings for, passed through to every RUN_SCRIPT call
-# below. Kept small: flattened bottleneck vectors are ~3.4 MB/sample/step. Override with
-# EMBEDDING_SAVE_STEPS=... in the environment if you want a different set.
 EMBEDDING_SAVE_STEPS="${EMBEDDING_SAVE_STEPS:-1 6 24 72 120 168}"
 
 interp="nearest"
