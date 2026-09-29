@@ -741,24 +741,29 @@ def AuroraBatch_2_nc_files(
 
     batch_dim = next(iter(_s))
 
+    # Move every tensor to CPU once for the whole batch; per-sample access below is a
+    # numpy view, instead of re-copying the full batch D2H for each sample.
+    surf_np = {k: _np(v) for k, v in batch.surf_vars.items()}
+    atmos_np = {k: _np(v) for k, v in batch.atmos_vars.items()}
+    static_np = {k: _np(v) for k, v in batch.static_vars.items()}
+    lat_np = _np(batch.metadata.lat)
+    lon_np = _np(batch.metadata.lon)
+
     for i in range(batch_dim):
         data_vars = {}
 
-        for k, v in batch.surf_vars.items():
-            arr = _np(v)[i]
-            data_vars[f"surf_{k}"] = (("history", "latitude", "longitude"), arr)
+        for k, arr in surf_np.items():
+            data_vars[f"surf_{k}"] = (("history", "latitude", "longitude"), arr[i])
 
-        for k, v in batch.atmos_vars.items():
-            arr = _np(v)[i]
-            data_vars[f"atmos_{k}"] = (("history", "level", "latitude", "longitude"), arr)
+        for k, arr in atmos_np.items():
+            data_vars[f"atmos_{k}"] = (("history", "level", "latitude", "longitude"), arr[i])
 
-        for k, v in batch.static_vars.items():
-            arr = _np(v)
+        for k, arr in static_np.items():
             data_vars[f"static_{k}"] = (("latitude", "longitude"), arr)
 
         coords = {
-            "latitude": _np(batch.metadata.lat),
-            "longitude": _np(batch.metadata.lon),
+            "latitude": lat_np,
+            "longitude": lon_np,
             "time": [batch.metadata.time[i]],
             "level": list(batch.metadata.atmos_levels),
             "rollout_step": batch.metadata.rollout_step,
