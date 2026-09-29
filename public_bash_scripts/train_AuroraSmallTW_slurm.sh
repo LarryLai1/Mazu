@@ -25,6 +25,12 @@ NUM_WORKERS=${NUM_WORKERS:-4}
 # Local pretrained weights: .safetensors (safetensors.load_file) or official Aurora .ckpt
 # (model.load_checkpoint_local). Defaults to the official AuroraSmall pretrained checkpoint.
 CHECKPOINT_PATH=${CHECKPOINT_PATH:-/work/b12902101/checkpoints/aurora/aurora-0.25-small-pretrained.ckpt}
+# HRES +6h forecasts (6-hourly inits) used to replace the outer ring of the training/validation
+# inputs, matching inference's input-space boundary replacement. Empty value disables it.
+BOUNDARY_ROOT_DIR=${BOUNDARY_ROOT_DIR-/tmp2/b12902101/hres_tw_forecast_0.25deg}
+BOUNDARY_WIDTH=${BOUNDARY_WIDTH:-8}
+BOUNDARY_SMOOTH_MODE=${BOUNDARY_SMOOTH_MODE:-no}
+BOUNDARY_TIME_INTERP_MODE=${BOUNDARY_TIME_INTERP_MODE:-nearest}
 
 ENV_PREFIX="/home/b12902101/micromamba/envs/AS"
 DATA_ROOT_DIR="/work/b12902101/era5_tw"
@@ -41,7 +47,16 @@ Options:
     --use-rope                Enable RoPE embedding
     --random-mlp              Randomly init MLP blocks after loading
     --epochs N                Training epochs (default: 50)
-    -h, --help                Show this help message
+    --boundary-root PATH      HRES +6h forecast root; the outer ring of every input step (train and
+                              val) is replaced by the HRES forecast valid at that time. An empty
+                              value disables replacement
+                              (default: /tmp2/b12902101/hres_tw_forecast_0.25deg, or $BOUNDARY_ROOT_DIR)
+    --boundary-width N        Ring width in grid cells (default: 8)
+    --boundary-smooth-mode M  no|linear|mean|gaussian (default: no)
+    --boundary-time-interp-mode M
+                              nearest|interpolation: map input times onto the 6-hourly HRES marks
+                              (default: nearest; ties go to the earlier mark)
+    -h, --help               Show this help message
 
 GPUs come from the #SBATCH --gres line; override at submit time with e.g.
     sbatch --gres=gpu:4 public_bash_scripts/train_AuroraSmallTW_slurm.sh ...
@@ -76,6 +91,26 @@ while [[ $# -gt 0 ]]; do
             EPOCHS="$2"
             shift 2
             ;;
+        --boundary-root)
+            [[ $# -ge 2 ]] || { echo "Missing value for --boundary-root" >&2; exit 2; }
+            BOUNDARY_ROOT_DIR="$2"
+            shift 2
+            ;;
+        --boundary-width)
+            [[ $# -ge 2 ]] || { echo "Missing value for --boundary-width" >&2; exit 2; }
+            BOUNDARY_WIDTH="$2"
+            shift 2
+            ;;
+        --boundary-smooth-mode)
+            [[ $# -ge 2 ]] || { echo "Missing value for --boundary-smooth-mode" >&2; exit 2; }
+            BOUNDARY_SMOOTH_MODE="$2"
+            shift 2
+            ;;
+        --boundary-time-interp-mode)
+            [[ $# -ge 2 ]] || { echo "Missing value for --boundary-time-interp-mode" >&2; exit 2; }
+            BOUNDARY_TIME_INTERP_MODE="$2"
+            shift 2
+            ;;
         -h|--help)
             print_usage
             exit 0
@@ -103,6 +138,10 @@ if [[ -z "${CHECKPOINT_PATH}" ]]; then
 fi
 if [[ ! -f "${CHECKPOINT_PATH}" ]]; then
     echo "Checkpoint not found: ${CHECKPOINT_PATH}" >&2
+    exit 1
+fi
+if [[ -n "${BOUNDARY_ROOT_DIR}" && ! -d "${BOUNDARY_ROOT_DIR}" ]]; then
+    echo "Boundary root not found: ${BOUNDARY_ROOT_DIR} (pass --boundary-root '' to disable boundary replacement)." >&2
     exit 1
 fi
 
@@ -159,6 +198,14 @@ if [[ "$USE_ROPE_EMBEDDING" == "1" ]]; then
 fi
 if [[ "$RANDOM_MLP" == "1" ]]; then
     OPTIONAL_ARGS+=("--random-mlp")
+fi
+if [[ -n "${BOUNDARY_ROOT_DIR}" ]]; then
+    OPTIONAL_ARGS+=(
+        "--boundary_root_dir" "${BOUNDARY_ROOT_DIR}"
+        "--boundary_width" "${BOUNDARY_WIDTH}"
+        "--boundary_smooth_mode" "${BOUNDARY_SMOOTH_MODE}"
+        "--boundary_time_interp_mode" "${BOUNDARY_TIME_INTERP_MODE}"
+    )
 fi
 
 echo "Job ${SLURM_JOB_ID:-local} on $(hostname): ${GPU_COUNT} GPU(s) [${CUDA_VISIBLE_DEVICES:-unset}], run ${NAME}"

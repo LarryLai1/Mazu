@@ -23,6 +23,7 @@ from aurora.model.swin3d import MLP as SwinMLP, SwiGLUMLP
 from aurora.model.util import init_weights
 
 from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora
+from datasets.BoundaryReplacedERA5Dataset import ERA5TWDatasetWithHRESInputBoundary
 
 from utils.metrics import AuroraMAELoss
 from utils.training_scheduler import get_scheduler_with_warmup
@@ -108,6 +109,31 @@ def parse_args():
     parser.add_argument("--lead_time", type = int, default = 0)
     parser.add_argument("--input_time_window", type = int, required = True)
     parser.add_argument("--rollout_step", type = int, required = True)
+
+    parser.add_argument(
+        "--boundary_root_dir",
+        type = str,
+        default = None,
+        help = "HRES +6h forecast root (6-hourly inits, one +6h lead per file). If set, the outer ring of "
+               "every input time step (train and val) is replaced by the HRES forecast valid at that time. "
+               "Default: disabled (inputs are pure ERA5).",
+    )
+    parser.add_argument("--boundary_width", type = int, default = 8, help = "Ring width in grid cells.")
+    parser.add_argument(
+        "--boundary_smooth_mode",
+        type = str,
+        default = "no",
+        choices = ["no", "linear", "mean", "gaussian"],
+        help = "Smoothing used for the input boundary replacement (same as inference).",
+    )
+    parser.add_argument(
+        "--boundary_time_interp_mode",
+        type = str,
+        default = "nearest",
+        choices = ["nearest", "interpolation"],
+        help = "How input times that are not a 00/06/12/18Z mark are mapped onto the 6-hourly HRES "
+               "forecasts: nearest mark (ties -> earlier) or linear interpolation between the two marks.",
+    )
 
     parser.add_argument("--use_muon", action = "store_true")
     parser.add_argument("--muon_gradient_accumulation_steps", type = int, default = 4)
@@ -208,6 +234,14 @@ def create_dataset(args, split):
             )
     else:
         raise Exception("Do not support this dataset split!")
+    if args.boundary_root_dir:
+        ds = ERA5TWDatasetWithHRESInputBoundary(
+            base_dataset = ds,
+            boundary_root_dir = args.boundary_root_dir,
+            boundary_width = args.boundary_width,
+            boundary_smooth_mode = args.boundary_smooth_mode,
+            boundary_time_interp_mode = args.boundary_time_interp_mode,
+        )
     return ds
 
 def save_checkpoint_by_epoch(args, accelerator, output_dir, epoch):
