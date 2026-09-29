@@ -87,9 +87,11 @@ def parse_args():
         "--replace_boundary_position",
         type = str,
         nargs = "+",
-        choices = ["encoder", "backbone"],
+        choices = ["input", "backbone"],
         default = [],
-        help = "Select where to replace the boundary latents.",
+        help = "Select where to replace the boundary. input = replace the boundary ring of the "
+               "physical input fields (before normalisation/encoding); backbone = replace in "
+               "latent space at the last backbone stage.",
     )
     parser.add_argument(
         "--boundary_resolution",
@@ -657,57 +659,53 @@ def _center_crop_boundary(tensor, boundary_width):
         return tensor
     return tensor[..., boundary_width:-boundary_width, boundary_width:-boundary_width]
 
-def _pad_interior_with_boundary(interior_tensor, boundary_tensor, boundary_width):
-    if boundary_width <= 0:
-        return interior_tensor
-    h_int, w_int = interior_tensor.shape[-2:]
-    h_b, w_b = boundary_tensor.shape[-2:]
-    if h_b != h_int + 2 * boundary_width or w_b != w_int + 2 * boundary_width:
-        raise ValueError("Boundary tensor shape does not match interior tensor + boundary_width.")
-    padded = boundary_tensor.clone()
-    padded[..., boundary_width:-boundary_width, boundary_width:-boundary_width] = interior_tensor
-    return padded
+def _replace_input_boundary(main_tensor, bc_tensor, boundary_width, smooth_mode = "no"):
+    """
+    Replace the outer ring (width `boundary_width` cells, over the last two dims H, W) of
+    `main_tensor` with `bc_tensor` in physical space. Leading dims are arbitrary.
+    smooth_mode: no (hard replace) / linear (linear blend ramp) /
+    mean, gaussian (hard replace, then 3x3 smoothing written back where d <= boundary_width).
+    """
+    bw = int(boundary_width)
+    if bw <= 0:
+        return main_tensor
+    if main_tensor.shape != bc_tensor.shape:
+        raise ValueError(
+            f"Input boundary replacement shape mismatch: main {tuple(main_tensor.shape)} vs boundary {tuple(bc_tensor.shape)}."
+        )
+    H, W = main_tensor.shape[-2:]
+    h_coords = torch.arange(H, device = main_tensor.device)
+    w_coords = torch.arange(W, device = main_tensor.device)
+    dist_h = torch.minimum(h_coords, H - 1 - h_coords)
+    dist_w = torch.minimum(w_coords, W - 1 - w_coords)
+    dist = torch.minimum(dist_h.unsqueeze(1), dist_w.unsqueeze(0))  # (H, W), 0 on the edge
 
-def _pad_static_vars(static_vars, boundary_width):
-    if boundary_width <= 0:
-        return static_vars
-    padded = {}
-    for var_name, tensor in static_vars.items():
-        if tensor.dim() == 2:
-            padded_tensor = F.pad(
-                tensor.unsqueeze(0).unsqueeze(0),
-                (boundary_width, boundary_width, boundary_width, boundary_width),
-                mode = "replicate",
-            ).squeeze(0).squeeze(0)
-        elif tensor.dim() == 3:
-            padded_tensor = F.pad(
-                tensor.unsqueeze(0),
-                (boundary_width, boundary_width, boundary_width, boundary_width),
-                mode = "replicate",
-            ).squeeze(0)
-        else:
-            padded_tensor = F.pad(
-                tensor,
-                (boundary_width, boundary_width, boundary_width, boundary_width),
-                mode = "replicate",
-            )
-        padded[var_name] = padded_tensor
-    return padded
+    if smooth_mode == "linear":
+        mask = torch.clamp(1.0 - dist.to(main_tensor.dtype) / bw, min = 0.0, max = 1.0)
+        return mask * bc_tensor + (1.0 - mask) * main_tensor
 
-def _replace_boundary_inside(pred_tensor, boundary_tensor, boundary_width):
-    if boundary_width <= 0:
-        return pred_tensor
-    if pred_tensor.dim() == boundary_tensor.dim() + 1:
-        boundary_tensor = boundary_tensor.unsqueeze(1)
-    if pred_tensor.dim() != boundary_tensor.dim():
-        raise ValueError("Boundary tensor rank does not match prediction tensor.")
-    updated = pred_tensor.clone()
-    bw = boundary_width
-    updated[..., :bw, :] = boundary_tensor[..., :bw, :]
-    updated[..., -bw:, :] = boundary_tensor[..., -bw:, :]
-    updated[..., :, :bw] = boundary_tensor[..., :, :bw]
-    updated[..., :, -bw:] = boundary_tensor[..., :, -bw:]
-    return updated
+    if smooth_mode not in ("no", "mean", "gaussian"):
+        raise ValueError(f"Unsupported smoothing mode: {smooth_mode}")
+
+    ring = dist < bw
+    replaced = torch.where(ring, bc_tensor, main_tensor)
+    if smooth_mode == "no":
+        return replaced
+
+    if smooth_mode == "mean":
+        kernel = torch.ones((1, 1, 3, 3), dtype = main_tensor.dtype, device = main_tensor.device) / 9.0
+    else:
+        kernel = torch.tensor([
+            [1.0, 2.0, 1.0],
+            [2.0, 4.0, 2.0],
+            [1.0, 2.0, 1.0]
+        ], dtype = main_tensor.dtype, device = main_tensor.device)
+        kernel = (kernel / kernel.sum()).view(1, 1, 3, 3)
+
+    flat = replaced.reshape(-1, 1, H, W)
+    padded = F.pad(flat, (1, 1, 1, 1), mode = "replicate")
+    smoothed = F.conv2d(padded, kernel).reshape(replaced.shape)
+    return torch.where(dist <= bw, smoothed, main_tensor)
 
 def _slice_interior(tensor, boundary_width):
     if boundary_width <= 0:
@@ -792,12 +790,14 @@ def model_forward_with_latent_boundary(model, batch_main, batch_bc, args):
 
     p = next(model.parameters())
 
-    def prepare_and_encode(batch):
+    def prepare_batch(batch):
         batch = model.batch_transform_hook(batch)
         batch = batch.type(p.dtype)
-        batch = batch.normalise(surf_stats=model.surf_stats)
         batch = batch.crop(patch_size=model.patch_size)
-        batch = batch.to(p.device)
+        return batch.to(p.device)
+
+    def encode_prepared(batch):
+        batch = batch.normalise(surf_stats=model.surf_stats)
 
         B, T = next(iter(batch.surf_vars.values())).shape[:2]
         static_vars = {}
@@ -835,80 +835,34 @@ def model_forward_with_latent_boundary(model, batch_main, batch_bc, args):
         )
         return x, batch
 
-    x_main, prepped_batch_main = prepare_and_encode(batch_main)
-    
+    # Physical-space ("input") boundary replacement happens on the main batch before
+    # normalisation / encoding; the boundary batch is only encoded for the backbone mode.
+    prepped_main = prepare_batch(batch_main)
+    if batch_bc is not None and "input" in args.replace_boundary_position:
+        prepped_bc = prepare_batch(batch_bc)
+        prepped_main = dataclasses.replace(
+            prepped_main,
+            surf_vars={
+                k: _replace_input_boundary(v, prepped_bc.surf_vars[k], args.boundary_width, args.boundary_smooth_mode)
+                for k, v in prepped_main.surf_vars.items()
+            },
+            atmos_vars={
+                k: _replace_input_boundary(v, prepped_bc.atmos_vars[k], args.boundary_width, args.boundary_smooth_mode)
+                for k, v in prepped_main.atmos_vars.items()
+            },
+        )
+
+    x_main, prepped_batch_main = encode_prepared(prepped_main)
+
     x_bc = None
-    if batch_bc is not None and any(pos in args.replace_boundary_position for pos in ["encoder", "backbone"]):
-        x_bc, _ = prepare_and_encode(batch_bc)
-        
-    if x_bc is not None and "encoder" in args.replace_boundary_position:
-        B, L_tokens, D = x_main.shape
-        latent_levels = model.encoder.latent_levels
-        patch_size = model.encoder.patch_size
-        H, W = prepped_batch_main.spatial_shape
-        H_latents = H // patch_size
-        W_latents = W // patch_size
+    if batch_bc is not None and "backbone" in args.replace_boundary_position:
+        x_bc, _ = encode_prepared(prepare_batch(batch_bc))
 
-        x_main_grid = x_main.view(B, latent_levels, H_latents, W_latents, D)
-        x_bc_grid = x_bc.view(B, latent_levels, H_latents, W_latents, D)
-
-        latent_boundary_width = args.boundary_width // patch_size
-        x_combined_grid = x_main_grid.clone()
-        if latent_boundary_width > 0:
-            if args.boundary_smooth_mode == "linear":
-                h_coords = torch.arange(H_latents, device=x_main_grid.device)
-                w_coords = torch.arange(W_latents, device=x_main_grid.device)
-                dist_h = torch.minimum(h_coords, H_latents - 1 - h_coords)
-                dist_w = torch.minimum(w_coords, W_latents - 1 - w_coords)
-                dist_grid = torch.minimum(dist_h.unsqueeze(1), dist_w.unsqueeze(0))
-                
-                mask = 1.0 - dist_grid.float() / latent_boundary_width
-                mask = torch.clamp(mask, min=0.0, max=1.0)
-                mask_expanded = mask.view(1, 1, H_latents, W_latents, 1)
-                x_combined_grid = mask_expanded * x_bc_grid + (1.0 - mask_expanded) * x_main_grid
-            else:
-                x_combined_grid[:, :, :latent_boundary_width, :, :] = x_bc_grid[:, :, :latent_boundary_width, :, :]
-                x_combined_grid[:, :, -latent_boundary_width:, :, :] = x_bc_grid[:, :, -latent_boundary_width:, :, :]
-                x_combined_grid[:, :, :, :latent_boundary_width, :] = x_bc_grid[:, :, :, :latent_boundary_width, :]
-                x_combined_grid[:, :, :, -latent_boundary_width:, :] = x_bc_grid[:, :, :, -latent_boundary_width:, :]
-
-                # Smooth the replacement result over H and W dimensions in the latent grid
-                if args.boundary_smooth_mode != "no":
-                    import torch.nn.functional as F
-                    orig_shape = x_combined_grid.shape
-                    # Permute to (B, latent_levels, D, H_latents, W_latents) so H, W are the last dimensions
-                    permuted = x_combined_grid.permute(0, 1, 4, 2, 3)
-                    # Reshape to flatten all dimensions except H_latents and W_latents
-                    flat_tensor = permuted.reshape(-1, 1, H_latents, W_latents)
-                    
-                    if args.boundary_smooth_mode == "mean":
-                        kernel = torch.ones((1, 1, 3, 3), dtype = x_combined_grid.dtype, device = x_combined_grid.device) / 9.0
-                    elif args.boundary_smooth_mode == "gaussian":
-                        kernel = torch.tensor([
-                            [1.0, 2.0, 1.0],
-                            [2.0, 4.0, 2.0],
-                            [1.0, 2.0, 1.0]
-                        ], dtype = x_combined_grid.dtype, device = x_combined_grid.device)
-                        kernel = kernel / kernel.sum()
-                        kernel = kernel.view(1, 1, 3, 3)
-                    else:
-                        raise ValueError(f"Unsupported smoothing mode: {args.boundary_smooth_mode}")
-                    
-                    # Smooth only on H and W dimensions
-                    padded = F.pad(flat_tensor, (1, 1, 1, 1), mode = "replicate")
-                    smoothed = F.conv2d(padded, kernel)
-                    
-                    # Reshape and permute back to (B, latent_levels, H_latents, W_latents, D)
-                    restored = smoothed.reshape(B, latent_levels, D, H_latents, W_latents)
-                    x_combined_grid = restored.permute(0, 1, 3, 4, 2)
-
-        x_combined = x_combined_grid.reshape(B, L_tokens, D)
-    else:
-        x_combined = x_main
-        H, W = prepped_batch_main.spatial_shape
-        H_latents = H // model.encoder.patch_size
-        W_latents = W // model.encoder.patch_size
-        latent_levels = model.encoder.latent_levels
+    x_combined = x_main
+    H, W = prepped_batch_main.spatial_shape
+    H_latents = H // model.encoder.patch_size
+    W_latents = W // model.encoder.patch_size
+    latent_levels = model.encoder.latent_levels
 
     patch_res = (
         latent_levels,
