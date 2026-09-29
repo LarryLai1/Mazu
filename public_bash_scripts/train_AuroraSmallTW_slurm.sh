@@ -8,7 +8,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=48
 #SBATCH --time=2-00:00:00
 #SBATCH --output=%x_%j.out
 
@@ -19,8 +19,9 @@ USE_SWIGLU_FFN=0
 USE_ROPE_EMBEDDING=0
 RANDOM_MLP=0
 EPOCHS=${EPOCHS:-50}
-# DataLoader workers per GPU process; 1 is enough since H2D transfer is the bottleneck.
-NUM_WORKERS=${NUM_WORKERS:-1}
+# DataLoader workers per GPU process. Loading is bound by opening many small netCDF
+# files per sample, so read them in parallel (8 GPUs x (1 + 4) procs fits 48 CPUs).
+NUM_WORKERS=${NUM_WORKERS:-4}
 # Local pretrained weights (.safetensors, loaded via safetensors.load_file).
 CHECKPOINT_PATH=${CHECKPOINT_PATH:-}
 
@@ -87,7 +88,7 @@ done
 
 # Slurm runs a copy of this script, so locate the repo via the submit directory.
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$(pwd)}"
-TRAIN_SCRIPT="${REPO_ROOT}/reference_artifact/train_AuroraSmallTW_otter_test.py"
+TRAIN_SCRIPT="${REPO_ROOT}/reference_artifact/train_AuroraSmallTW_fast.py"
 if [[ ! -f "${TRAIN_SCRIPT}" ]]; then
     echo "Cannot find ${TRAIN_SCRIPT}; submit this job from the Mazu repo root." >&2
     exit 1
