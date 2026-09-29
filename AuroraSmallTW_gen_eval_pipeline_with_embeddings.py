@@ -701,7 +701,16 @@ def create_boundary_dataset(args, target_latitude = None, target_longitude = Non
         if args.boundary_source == "hres":
             prediction_timedeltas = [0, 12]
         elif args.boundary_source == "ground_truth":
-            prediction_timedeltas = [k * args.lead_time for k in range(args.rollout_step + 1)]
+            # Exactly the offsets the rollout will ask for, history slots included: one source
+            # then spans the whole trajectory, so the forecast-source fast path never has to
+            # fall back to another cycle.
+            _tw_max = max(0, getattr(args, "input_time_window", 1) - 1)
+            _ts = getattr(args, "timestep_hours", args.lead_time)
+            prediction_timedeltas = sorted({
+                k * args.lead_time - tw * _ts
+                for k in range(args.rollout_step + 1)
+                for tw in range(_tw_max + 1)
+            })
         else:
             prediction_timedeltas = [0, 6, 12]
 
@@ -848,7 +857,12 @@ def _build_boundary_batch_from_hres_source(
     atmos_vars = {}
 
     for base_time, target_time in zip(base_times, target_times):
-        if target_time < base_time:
+        # Which cycle holds this target is the dataset's call: forecast sources fall back to the
+        # previous cycle for history slots, ground truth spans its own history and never moves.
+        _eff = getattr(boundary_dataset, "effective_base_time", None)
+        if _eff is not None:
+            effective_base_time = _eff(base_time, target_time)
+        elif target_time < base_time:
             hist_cycle = getattr(boundary_dataset, "forecast_cycle_hours", 12)
             effective_base_time = base_time - pd.Timedelta(hours = hist_cycle)
         else:
@@ -876,7 +890,12 @@ def _build_boundary_batch_from_gpu_cache(
     atmos_vars = {}
 
     for base_time, target_time in zip(base_times, target_times):
-        if target_time < base_time:
+        # Which cycle holds this target is the dataset's call: forecast sources fall back to the
+        # previous cycle for history slots, ground truth spans its own history and never moves.
+        _eff = getattr(boundary_dataset, "effective_base_time", None)
+        if _eff is not None:
+            effective_base_time = _eff(base_time, target_time)
+        elif target_time < base_time:
             hist_cycle = getattr(boundary_dataset, "forecast_cycle_hours", 12)
             effective_base_time = base_time - pd.Timedelta(hours = hist_cycle)
         else:

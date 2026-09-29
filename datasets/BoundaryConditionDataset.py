@@ -342,6 +342,18 @@ class BoundaryConditionDataset_Aurora(torch.utils.data.Dataset):
         target_time = pd.Timestamp(target_time)
         return target_time.floor(f"{self.forecast_cycle_hours}h")
 
+    def effective_base_time(self, base_time: pd.Timestamp, target_time: pd.Timestamp) -> pd.Timestamp:
+        """Which cycle actually holds `target_time`.
+
+        Target times before the base cycle (the history slots of the first rollout steps) are
+        served by the previous cycle. Sources whose trajectory already covers its own history
+        override this to return `base_time` unchanged.
+        """
+        base_time = pd.Timestamp(base_time)
+        if pd.Timestamp(target_time) < base_time:
+            return base_time - pd.Timedelta(hours = self.forecast_cycle_hours)
+        return base_time
+
     def get_boundary_source(self, base_time: pd.Timestamp) -> dict:
         base_time = pd.Timestamp(base_time)
         if self.use_cache:
@@ -1030,6 +1042,13 @@ class BoundaryConditionDataset_HRES(torch.utils.data.Dataset):
         target_time = pd.Timestamp(target_time)
         return target_time.floor(f"{self.forecast_cycle_hours}h")
 
+    def effective_base_time(self, base_time: pd.Timestamp, target_time: pd.Timestamp) -> pd.Timestamp:
+        """Target times before the base cycle are served by the previous cycle."""
+        base_time = pd.Timestamp(base_time)
+        if pd.Timestamp(target_time) < base_time:
+            return base_time - pd.Timedelta(hours = self.forecast_cycle_hours)
+        return base_time
+
     def get_boundary_source(self, base_time: pd.Timestamp) -> dict:
         base_time = pd.Timestamp(base_time)
         if self.use_cache:
@@ -1111,10 +1130,12 @@ class BoundaryConditionDataset_HRES(torch.utils.data.Dataset):
 
         return result
 class BoundaryConditionDataset_GroundTruth(BoundaryConditionDataset_Aurora):
-    # Ground-truth analysis is exactly time-aligned (no forecast lead time); its source carries only
-    # absolute time_values, so it stays on the generic absolute-time pipeline path, not the
-    # prediction_timedelta forecast-source fast path.
-    uses_forecast_source = False
+    # Ground-truth analysis is exactly time-aligned, but one source still covers a whole
+    # trajectory (base_time + every requested offset), so it can be served through the same
+    # prediction_timedelta fast path as hres/aurora: the time axis becomes a device-resident
+    # float tensor and selection is a pure torch op, instead of a per-variable numpy datetime
+    # search against a pandas DatetimeIndex on every rollout step.
+    uses_forecast_source = True
 
     def _dt_to_path(self, date_hour: pd.Timestamp) -> tuple[str, str]:
         dir_path = Path(self.boundary_root_dir) / date_hour.strftime(r"%Y/%Y%m/%Y%m%d")
@@ -1197,6 +1218,12 @@ class BoundaryConditionDataset_GroundTruth(BoundaryConditionDataset_Aurora):
 
         source = {
             "time_values": pd.DatetimeIndex(time_values),
+            # Offsets from base_time, in hours: what turns this into a forecast-source-shaped
+            # trajectory the fast path can slice on device. Ascending, matching the stack order.
+            "prediction_timedelta_hours": torch.as_tensor(
+                [td / pd.Timedelta(hours = 1) for td in self.prediction_timedeltas],
+                dtype = torch.float32,
+            ),
             "latitude": latitude_tensor,
             "longitude": longitude_tensor,
             "levels": levels_tuple,
@@ -1205,12 +1232,17 @@ class BoundaryConditionDataset_GroundTruth(BoundaryConditionDataset_Aurora):
         }
         return source
 
+    def effective_base_time(self, base_time: pd.Timestamp, target_time: pd.Timestamp) -> pd.Timestamp:
+        # There are no forecast cycles to fall back to: one ground-truth source already spans the
+        # negative (history) offsets as well, so the base never moves.
+        return pd.Timestamp(base_time)
+
     def get_latitude_longitude(self):
         if self.use_cache and self._cache_latitude is not None:
             return self._cache_latitude, self._cache_longitude
         
-        target_time = self.time_axis[0] + self.prediction_timedeltas[0]
-        upper_path, _ = self._dt_to_path(target_time)
+        # Offset 0, not prediction_timedeltas[0]: the offset list may start negative (history).
+        upper_path, _ = self._dt_to_path(self.time_axis[0])
         latitude_bounds, longitude_bounds = self._spatial_bounds()
         with xr.open_dataset(upper_path, decode_timedelta = True) as upper_nc:
             upper_nc.load()
@@ -1225,8 +1257,8 @@ class BoundaryConditionDataset_GroundTruth(BoundaryConditionDataset_Aurora):
     def get_levels(self):
         if self.use_cache and self._cache_levels is not None:
             return self._cache_levels
-        target_time = self.time_axis[0] + self.prediction_timedeltas[0]
-        upper_path, _ = self._dt_to_path(target_time)
+        # Offset 0, not prediction_timedeltas[0]: the offset list may start negative (history).
+        upper_path, _ = self._dt_to_path(self.time_axis[0])
         with xr.open_dataset(upper_path, decode_timedelta = True) as upper_nc:
             upper_nc.load()
             level_dim = "level" if "level" in upper_nc.dims else "pressure_level"

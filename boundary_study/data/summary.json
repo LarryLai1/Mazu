@@ -1,0 +1,146 @@
+{
+ "day/base": {
+  "mae_int_msl_overall": 76.995,
+  "mae_int_z_overall": 85.175,
+  "dcos_overall": 0.01652,
+  "burst_over_rest_msl": 1.3332,
+  "clock_peak_to_trough_msl": 2.1378,
+  "z500_highk_ratio": 1.1956,
+  "z500_highk_burst_over_rest": 1.054
+ },
+ "day/gt": {
+  "mae_int_msl_overall": 54.59,
+  "mae_int_z_overall": 60.239,
+  "dcos_overall": 0.00373,
+  "burst_over_rest_msl": 0.9678,
+  "clock_peak_to_trough_msl": 1.6244,
+  "z500_highk_ratio": 1.0846,
+  "z500_highk_burst_over_rest": 1.0103
+ },
+ "day/gt6": {
+  "mae_int_msl_overall": 73.013,
+  "mae_int_z_overall": 73.408,
+  "dcos_overall": 0.01866,
+  "burst_over_rest_msl": 1.387,
+  "clock_peak_to_trough_msl": 2.1546,
+  "z500_highk_ratio": 1.1495,
+  "z500_highk_burst_over_rest": 1.0525
+ },
+ "day/res0.5": {
+  "mae_int_msl_overall": 79.12,
+  "mae_int_z_overall": 84.981,
+  "dcos_overall": 0.01649,
+  "burst_over_rest_msl": 1.3566,
+  "clock_peak_to_trough_msl": 2.1603,
+  "z500_highk_ratio": 1.1451,
+  "z500_highk_burst_over_rest": 1.0669
+ },
+ "day/res1.5": {
+  "mae_int_msl_overall": 115.691,
+  "mae_int_z_overall": 100.98,
+  "dcos_overall": 0.01618,
+  "burst_over_rest_msl": 1.2072,
+  "clock_peak_to_trough_msl": 2.0548,
+  "z500_highk_ratio": 1.2005,
+  "z500_highk_burst_over_rest": 1.0734
+ },
+ "day/w12": {
+  "mae_int_msl_overall": 84.347,
+  "mae_int_z_overall": 86.531,
+  "dcos_overall": 0.02313,
+  "burst_over_rest_msl": 1.4486,
+  "clock_peak_to_trough_msl": 2.3321,
+  "z500_highk_ratio": 1.1936,
+  "z500_highk_burst_over_rest": 1.0571
+ },
+ "day/w16": {
+  "mae_int_msl_overall": 96.354,
+  "mae_int_z_overall": 90.476,
+  "dcos_overall": 0.02408,
+  "burst_over_rest_msl": 1.3901,
+  "clock_peak_to_trough_msl": 2.6008,
+  "z500_highk_ratio": 1.2879,
+  "z500_highk_burst_over_rest": 1.0568
+ },
+ "day/w4": {
+  "mae_int_msl_overall": 84.943,
+  "mae_int_z_overall": 94.216,
+  "dcos_overall": 0.01444,
+  "burst_over_rest_msl": 1.18,
+  "clock_peak_to_trough_msl": 1.7598,
+  "z500_highk_ratio": 1.2008,
+  "z500_highk_burst_over_rest": 1.0661
+ },
+ "month/base": {
+  "mae_int_msl_overall": 84.347,
+  "mae_int_z_overall": 88.002,
+  "dcos_overall": 0.01683,
+  "burst_over_rest_msl": 1.2949,
+  "clock_peak_to_trough_msl": 1.965,
+  "z500_highk_ratio": 1.0681,
+  "z500_highk_burst_over_rest": 1.0147
+ },
+ "month/gt": {
+  "mae_int_msl_overall": 56.627,
+  "mae_int_z_overall": 54.137,
+  "dcos_overall": 0.0031,
+  "burst_over_rest_msl": 0.9989,
+  "clock_peak_to_trough_msl": 1.2322,
+  "z500_highk_ratio": 1.0165,
+  "z500_highk_burst_over_rest": 0.9994
+ },
+ "month/gt6": {
+  "mae_int_msl_overall": 82.661,
+  "mae_int_z_overall": 79.859,
+  "dcos_overall": 0.01597,
+  "burst_over_rest_msl": 1.2739,
+  "clock_peak_to_trough_msl": 1.8466,
+  "z500_highk_ratio": 1.0544,
+  "z500_highk_burst_over_rest": 1.012
+ },
+ "month/res0.5": {
+  "mae_int_msl_overall": 84.826,
+  "mae_int_z_overall": 86.875,
+  "dcos_overall": 0.01668,
+  "burst_over_rest_msl": 1.2891,
+  "clock_peak_to_trough_msl": 1.8752,
+  "z500_highk_ratio": 1.0549,
+  "z500_highk_burst_over_rest": 1.0136
+ },
+ "month/res1.5": {
+  "mae_int_msl_overall": 111.275,
+  "mae_int_z_overall": 105.869,
+  "dcos_overall": 0.01753,
+  "burst_over_rest_msl": 1.1994,
+  "clock_peak_to_trough_msl": 1.8014,
+  "z500_highk_ratio": 1.0516,
+  "z500_highk_burst_over_rest": 1.0108
+ },
+ "month/w12": {
+  "mae_int_msl_overall": 90.422,
+  "mae_int_z_overall": 89.723,
+  "dcos_overall": 0.02151,
+  "burst_over_rest_msl": 1.3605,
+  "clock_peak_to_trough_msl": 2.0595,
+  "z500_highk_ratio": 1.0885,
+  "z500_highk_burst_over_rest": 1.017
+ },
+ "month/w16": {
+  "mae_int_msl_overall": 94.628,
+  "mae_int_z_overall": 89.641,
+  "dcos_overall": 0.02149,
+  "burst_over_rest_msl": 1.3508,
+  "clock_peak_to_trough_msl": 2.4174,
+  "z500_highk_ratio": 1.1052,
+  "z500_highk_burst_over_rest": 1.0181
+ },
+ "month/w4": {
+  "mae_int_msl_overall": 88.578,
+  "mae_int_z_overall": 93.061,
+  "dcos_overall": 0.01455,
+  "burst_over_rest_msl": 1.1982,
+  "clock_peak_to_trough_msl": 1.751,
+  "z500_highk_ratio": 1.0614,
+  "z500_highk_burst_over_rest": 1.0176
+ }
+}

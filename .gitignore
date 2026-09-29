@@ -18,3 +18,9 @@ wavenumber_plots*
 tests/
 embedding_distance_plots/
 embedding_tsne_plots/
+
+# diagnosis outputs (large, regenerable) -- keeps `git clean -fd` from wiping them
+diagnosis_6h/data/
+diagnosis_6h/figs/
+diagnosis_6h/report.html
+diagnosis_6h/report2.html

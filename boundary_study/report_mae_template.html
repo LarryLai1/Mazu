@@ -1,0 +1,348 @@
+<title>邊界條件掃描：MAE 對 lead time</title>
+<style>
+  :root {
+    color-scheme: light;
+    --ground:   #f4f6f8;
+    --panel:    #ffffff;
+    --panel-2:  #e9edf2;
+    --ink:      #0f1620;
+    --ink-2:    #56606d;
+    --ink-3:    #8a94a1;
+    --rule:     #d7dde4;
+    --rule-2:   #b9c3cd;
+    --accent:   #2a78d6;
+    --viz-ink:  #0f1620;
+    --viz-ink-2:#56606d;
+    --viz-grid: #9ca3af;
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --series-3: #1baf7a;
+    --series-4: #7d6ad9;
+
+    --sans: system-ui, -apple-system, "Segoe UI", "PingFang TC", "Noto Sans CJK TC",
+            "Microsoft JhengHei", sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --ground: #0d1218; --panel: #141b23; --panel-2: #1c242e;
+      --ink: #e8edf3; --ink-2: #9ba6b3; --ink-3: #6b7683;
+      --rule: #232c37; --rule-2: #313c48; --accent: #3987e5;
+      --viz-ink: #e8edf3; --viz-ink-2: #9ba6b3; --viz-grid: #59626f;
+      --series-1: #3987e5; --series-2: #f0763f; --series-3: #22c78b; --series-4: #a294ec;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ground: #0d1218; --panel: #141b23; --panel-2: #1c242e;
+    --ink: #e8edf3; --ink-2: #9ba6b3; --ink-3: #6b7683;
+    --rule: #232c37; --rule-2: #313c48; --accent: #3987e5;
+    --viz-ink: #e8edf3; --viz-ink-2: #9ba6b3; --viz-grid: #59626f;
+    --series-1: #3987e5; --series-2: #f0763f; --series-3: #22c78b; --series-4: #a294ec;
+  }
+
+  body {
+    background: var(--ground); color: var(--ink); font-family: var(--sans);
+    font-size: 15.5px; line-height: 1.72; margin: 0; padding: 0 20px 96px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  .prose { max-width: 70ch; }
+
+  header.top { padding: 56px 0 32px; border-bottom: 3px solid var(--ink); margin-bottom: 8px; }
+  .kicker {
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 14px; font-weight: 600;
+  }
+  h1 {
+    font-size: clamp(28px, 4vw, 42px); line-height: 1.15; letter-spacing: -0.025em;
+    font-weight: 750; margin: 0 0 16px; text-wrap: balance;
+  }
+  .lede { font-size: 17px; color: var(--ink-2); max-width: 64ch; margin: 0; }
+  .lede strong { color: var(--ink); font-weight: 650; }
+
+  h2 {
+    font-size: 13px; font-family: var(--mono); letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 600;
+    margin: 64px 0 0; padding-bottom: 10px; border-bottom: 1px solid var(--rule-2);
+  }
+  h2 + .h2sub {
+    font-size: 25px; font-weight: 700; letter-spacing: -0.015em; margin: 16px 0 8px;
+    line-height: 1.25; text-wrap: balance;
+  }
+  h3 { font-size: 16.5px; font-weight: 650; margin: 30px 0 4px; }
+  p { margin: 13px 0; }
+  ul, ol { margin: 13px 0; padding-left: 22px; }
+  li { margin: 6px 0; }
+  code {
+    font-family: var(--mono); font-size: 0.87em; background: var(--panel-2);
+    padding: 1.5px 5px; border-radius: 2px;
+  }
+  .n { font-family: var(--mono); font-weight: 650; font-variant-numeric: tabular-nums; }
+
+  .spec {
+    display: flex; flex-wrap: wrap; gap: 0; margin: 22px 0 6px;
+    border: 1px solid var(--rule); background: var(--panel);
+  }
+  .spec div { padding: 11px 18px; border-right: 1px solid var(--rule); }
+  .spec div:last-child { border-right: none; }
+  .spec dt {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--ink-3); margin: 0 0 3px;
+  }
+  .spec dd { margin: 0; font-size: 14.5px; font-family: var(--mono); font-weight: 600; }
+  .spec div.vary { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+  .spec div.vary dt { color: var(--accent); }
+
+  figure { margin: 24px 0 32px; }
+  .figbox {
+    background: var(--panel); border: 1px solid var(--rule); padding: 16px 16px 8px;
+    overflow-x: auto;
+  }
+  svg.fig { display: block; width: 100%; height: auto; min-width: 760px; }
+  figcaption { font-size: 13px; color: var(--ink-2); margin-top: 11px; max-width: 88ch; }
+
+  .tablebox { overflow-x: auto; margin: 22px 0; }
+  table { border-collapse: collapse; font-size: 14px; width: 100%; min-width: 620px; }
+  th, td { text-align: left; padding: 8px 12px 8px 0; border-bottom: 1px solid var(--rule); }
+  th {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 600; border-bottom: 1px solid var(--rule-2);
+  }
+  td.n2 { font-family: var(--mono); text-align: right; padding-right: 20px;
+          font-variant-numeric: tabular-nums; }
+  th.n2 { text-align: right; padding-right: 20px; }
+  tr.base td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  tr.grp td {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--ink-3); padding-top: 16px; border-bottom: 1px solid var(--rule-2);
+  }
+
+  pre {
+    background: var(--panel-2); border: 1px solid var(--rule); padding: 14px 16px;
+    overflow-x: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.65;
+  }
+  pre code { background: none; padding: 0; }
+  footer { margin-top: 68px; padding-top: 20px; border-top: 1px solid var(--rule);
+           font-size: 13px; color: var(--ink-3); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+
+<div class="wrap">
+
+<header class="top">
+  <p class="kicker">Mazu · AuroraSmallTW · 1 h 模型 · 邊界條件掃描</p>
+  <h1>邊界條件掃描：MAE 對 lead time</h1>
+  <p class="lede">
+    三個變因 —— <strong>解析度、厚度、來源</strong> —— 各掃一遍，
+    看 MAE 隨 lead time 怎麼長，跑滿 <strong>168 小時</strong>。
+    每個變因兩張圖：<strong>24 個起報的平均</strong>，以及
+    <strong>2020-03-01 00Z 那一條</strong>。
+  </p>
+</header>
+
+<section>
+<h2>Setup</h2>
+<p class="h2sub">設定</p>
+
+<div class="tablebox">
+<table>
+<thead><tr><th>設定</th><th>來源</th><th class="n2">厚度</th><th class="n2">解析度</th><th>屬於哪個變因</th></tr></thead>
+<tbody>__CONFIG_TABLE__</tbody>
+</table>
+</div>
+
+<div class="prose">
+<p>沒有掃到的參數一律固定在預設值：</p>
+</div>
+<div class="spec">
+  <div><dt>apply mode</dt><dd>direct</dd></div>
+  <div><dt>time interp</dt><dd>nearest</dd></div>
+  <div><dt>replace at</dt><dd>backbone</dd></div>
+  <div><dt>pooling</dt><dd>off</dd></div>
+  <div><dt>timestep</dt><dd>1 h</dd></div>
+  <div><dt>rollout</dt><dd>168 h</dd></div>
+</div>
+
+<h3>兩種呈現</h3>
+<div class="prose">
+<ul>
+  <li><b>平均</b> —— 2020-03-01 當天 00Z–23Z 共 24 條 rollout 的平均。
+      曲線平滑，看的是整體的誤差成長。</li>
+  <li><b>00Z</b> —— 單獨 2020-03-01 00:00 UTC 起報的那一條。
+      因為只有一個起報時刻，clock hour 和 lead time 完全綁定
+      （clock hour = lead mod 24），所以 6 小時的邊界節奏會<b>直接以鋸齒的形式</b>
+      出現在 lead 軸上，不會被平均掉。</li>
+</ul>
+</div>
+
+<h3>MAE 怎麼算</h3>
+<div class="prose">
+<p>
+  九個面板就是 <code>draw_error_plots.py</code> 那張 3×3 摘要圖的九個關鍵變數
+  （t2m、msl、u10、v10、z_500、t_850、q_700、u_850、v_850），對 ERA5 逐時分析場計算。
+</p>
+<p>
+  一律取<b>共同內部</b>：四邊各去掉 16 格，也就是最寬那個設定的邊界厚度。
+  不這樣做的話，厚度掃描等於在比「哪個設定用邊界資料蓋掉了比較多格點」，而不是在比預報品質。
+</p>
+</div>
+</section>
+
+<section>
+<h2>Factor 1</h2>
+<p class="h2sub">邊界解析度</p>
+<div class="spec">
+  <div class="vary"><dt>varying</dt><dd>0.25° / 0.5° / 1.5°</dd></div>
+  <div><dt>source</dt><dd>hres</dd></div>
+  <div><dt>width</dt><dd>8</dd></div>
+  <div><dt>apply</dt><dd>direct</dd></div>
+</div>
+<div class="prose">
+<p>
+  0.25° 是原生網格；0.5° 由 0.25° 平均池化再以區塊複製放回（<code>direct</code>）；
+  1.5° 讀原生的 1.5° 資料集再最近鄰重新取樣到模型網格。
+</p>
+</div>
+<figure>
+  <div class="figbox">__FIG:fig_resolution_mae_avg__</div>
+  <figcaption>24 個起報平均。</figcaption>
+</figure>
+<figure>
+  <div class="figbox">__FIG:fig_resolution_mae_00z__</div>
+  <figcaption>單獨 00Z 那一條。</figcaption>
+</figure>
+</section>
+
+<section>
+<h2>Factor 2</h2>
+<p class="h2sub">邊界厚度</p>
+<div class="spec">
+  <div class="vary"><dt>varying</dt><dd>4 / 8 / 12 / 16</dd></div>
+  <div><dt>source</dt><dd>hres</dd></div>
+  <div><dt>resolution</dt><dd>0.25°</dd></div>
+  <div><dt>apply</dt><dd>direct</dd></div>
+</div>
+<div class="prose">
+<p>
+  厚度在 latent 網格上生效：<code>latent_width = boundary_width / patch_size</code>，
+  patch size 為 4，所以 4 / 8 / 12 / 16 對應 latent 的 1 / 2 / 3 / 4 圈。
+</p>
+</div>
+<figure>
+  <div class="figbox">__FIG:fig_width_mae_avg__</div>
+  <figcaption>24 個起報平均。MAE 在共同內部（各邊去 16 格）上計算，
+  所以厚度大的設定沒有因為「蓋掉比較多格點」而佔便宜。</figcaption>
+</figure>
+<figure>
+  <div class="figbox">__FIG:fig_width_mae_00z__</div>
+  <figcaption>單獨 00Z 那一條。</figcaption>
+</figure>
+</section>
+
+<section>
+<h2>Factor 3</h2>
+<p class="h2sub">邊界來源</p>
+<div class="spec">
+  <div class="vary"><dt>varying</dt><dd>hres / gt / gt6</dd></div>
+  <div><dt>width</dt><dd>8</dd></div>
+  <div><dt>resolution</dt><dd>0.25°</dd></div>
+  <div><dt>apply</dt><dd>direct</dd></div>
+</div>
+<div class="prose">
+<p>
+  HRES 和 ground truth 差了<b>兩件事</b>：HRES 是<b>預報</b>（帶預報誤差），而且是
+  <b>6 小時一格</b>（<code>nearest</code> 把它變成階梯）。單純比這兩者分不出是哪一個造成的，
+  所以放三條線：
+</p>
+<ul>
+  <li><code>base</code> —— HRES 預報，6 小時一格，起報 00Z / 12Z。</li>
+  <li><code>gt</code> —— ERA5 分析場，<b>逐時</b>，和評分真值同一份資料、時間完全對齊。</li>
+  <li><code>gt6</code> —— <b>一樣是 ERA5 分析場，但只給 6 小時一格</b>，
+      錨在和 HRES 相同的 00Z / 12Z 網格上，一樣用 <code>nearest</code> 取。
+      場是完美的，只有取樣被打回 6 小時。</li>
+</ul>
+</div>
+<figure>
+  <div class="figbox">__FIG:fig_source_mae_avg__</div>
+  <figcaption>24 個起報平均。</figcaption>
+</figure>
+<figure>
+  <div class="figbox">__FIG:fig_source_mae_00z__</div>
+  <figcaption>單獨 00Z 那一條。msl 與 z_500 面板上的鋸齒最明顯：
+  <code>gt6</code>（紫）跟著 <code>base</code>（藍）一起跳，<code>gt</code>（綠）平滑。</figcaption>
+</figure>
+</section>
+
+<section>
+<h2>Numbers</h2>
+<p class="h2sub">總表</p>
+<div class="prose">
+<p>MAE(msl) 與 MAE(z_500)，單位分別是 Pa 與 m²/s²。<code>mean</code> 是 lead 1–168 的平均。</p>
+</div>
+<div class="tablebox">
+<table>
+<thead>
+<tr><th>設定</th>
+    <th class="n2">msl@24h</th><th class="n2">msl@72h</th><th class="n2">msl@168h</th>
+    <th class="n2">msl mean</th><th class="n2">z500 mean</th>
+    <th class="n2">msl@24h</th><th class="n2">msl@72h</th><th class="n2">msl@168h</th>
+    <th class="n2">msl mean</th><th class="n2">z500 mean</th></tr>
+<tr><th></th><th class="n2" colspan="5" style="text-align:left;color:var(--accent)">24 個起報平均</th>
+    <th class="n2" colspan="5" style="text-align:left;color:var(--accent)">00Z 單一條</th></tr>
+</thead>
+<tbody>__SUMMARY_TABLE__</tbody>
+</table>
+</div>
+</section>
+
+<section>
+<h2>Appendix</h2>
+<p class="h2sub">Ground truth 邊界改走 HRES 的加速路徑</p>
+<div class="prose">
+<p>
+  順手改掉的。原本 <code>BoundaryConditionDataset_GroundTruth</code> 標記
+  <code>uses_forecast_source = False</code>，走泛用的絕對時間路徑：
+  沒開 <code>--gpu_cache</code> 時每一個 rollout step 都要重新讀一次 netCDF。
+</p>
+<p>
+  其實一份 ground truth source 本來就涵蓋整條軌跡（<code>base_time</code> 加上每一個要求的位移），
+  形狀和 HRES 的 forecast source 一樣，可以走同一條快速路徑。改動：
+</p>
+<ul>
+  <li>source 多帶一個 <code>prediction_timedelta_hours</code> 張量，時間軸變成可放在 GPU 上的 float，
+      選格變成純 torch 運算。</li>
+  <li><code>uses_forecast_source = True</code>。</li>
+  <li>新增 <code>effective_base_time()</code>：預報型來源遇到歷史時刻要退回前一個 cycle，
+      ground truth 自己就涵蓋負的位移、base 永遠不動。兩個 pipeline 改成呼叫這個方法，
+      不再各自寫死那段判斷。</li>
+  <li><code>create_boundary_dataset</code> 對 ground truth 產生的位移改為<b>正好是 rollout 會問的那些</b>，
+      含輸入視窗的負位移。</li>
+</ul>
+<p>
+  驗證：所有時刻、所有變數，新舊兩條路徑取出的場<b>逐位元相同</b>（max diff <span class="n">0.0</span>）。
+  每個 boundary step 的成本從 <span class="n">82.7 ms</span> 降到
+  <span class="n">0.78 ms</span>（<span class="n">105×</span>）。
+</p>
+</div>
+
+<h3>重跑</h3>
+<pre><code>cd /tmp3/b12902101/Mazu/boundary_study
+python run_boundary_study.py --scale day --rollout_step 168 --batch_size 6 --gpus 0,1,2,3,4,5,6,7
+python analyse_mae.py</code></pre>
+<div class="prose">
+<p>
+  逐 init、逐 lead 的原始數字在 <code>data/metrics_day_&lt;config&gt;.csv</code>，
+  圖在 <code>figs/</code>，表格數字在 <code>data/summary_mae.json</code>。
+</p>
+</div>
+</section>
+
+<footer>
+  資料：ERA5 逐時分析（真值與 ground truth 邊界）、ECMWF HRES 預報（0.25° 與 1.5°）。
+  模型 <code>AuroraSmall</code>、<code>timestep = 1 h</code>、<code>input_time_window = 2</code>、無 LoRA、
+  checkpoint <code>lateral_smooth/model_weights/Aurora/model.safetensors</code>。
+</footer>
+
+</div>

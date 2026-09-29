@@ -1,0 +1,428 @@
+<title>邊界條件的 6 小時誤差爆增：三個變因掃描</title>
+<style>
+  :root {
+    color-scheme: light;
+    --ground:   #f4f6f8;
+    --panel:    #ffffff;
+    --panel-2:  #e9edf2;
+    --ink:      #0f1620;
+    --ink-2:    #56606d;
+    --ink-3:    #8a94a1;
+    --rule:     #d7dde4;
+    --rule-2:   #b9c3cd;
+    --accent:   #2a78d6;
+    --warm:     #eb6834;
+    --good:     #1baf7a;
+    --viz-ink:  #0f1620;
+    --viz-ink-2:#56606d;
+    --viz-grid: #9ca3af;
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --series-3: #1baf7a;
+    --series-4: #7d6ad9;
+
+    --sans: system-ui, -apple-system, "Segoe UI", "PingFang TC", "Noto Sans CJK TC",
+            "Microsoft JhengHei", sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --ground: #0d1218; --panel: #141b23; --panel-2: #1c242e;
+      --ink: #e8edf3; --ink-2: #9ba6b3; --ink-3: #6b7683;
+      --rule: #232c37; --rule-2: #313c48;
+      --accent: #3987e5; --warm: #f0763f; --good: #22c78b;
+      --viz-ink: #e8edf3; --viz-ink-2: #9ba6b3; --viz-grid: #59626f;
+      --series-1: #3987e5; --series-2: #f0763f; --series-3: #22c78b; --series-4: #a294ec;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ground: #0d1218; --panel: #141b23; --panel-2: #1c242e;
+    --ink: #e8edf3; --ink-2: #9ba6b3; --ink-3: #6b7683;
+    --rule: #232c37; --rule-2: #313c48;
+    --accent: #3987e5; --warm: #f0763f; --good: #22c78b;
+    --viz-ink: #e8edf3; --viz-ink-2: #9ba6b3; --viz-grid: #59626f;
+    --series-1: #3987e5; --series-2: #f0763f; --series-3: #22c78b; --series-4: #a294ec;
+  }
+
+  body {
+    background: var(--ground); color: var(--ink); font-family: var(--sans);
+    font-size: 15.5px; line-height: 1.72; margin: 0; padding: 0 20px 96px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  .prose { max-width: 70ch; }
+
+  header.top { padding: 56px 0 32px; border-bottom: 3px solid var(--ink); margin-bottom: 8px; }
+  .kicker {
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 14px; font-weight: 600;
+  }
+  h1 {
+    font-size: clamp(28px, 4vw, 42px); line-height: 1.15; letter-spacing: -0.025em;
+    font-weight: 750; margin: 0 0 16px; text-wrap: balance;
+  }
+  .lede { font-size: 17px; color: var(--ink-2); max-width: 64ch; margin: 0; }
+  .lede strong { color: var(--ink); font-weight: 650; }
+
+  h2 {
+    font-size: 13px; font-family: var(--mono); letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 600;
+    margin: 68px 0 0; padding-bottom: 10px; border-bottom: 1px solid var(--rule-2);
+  }
+  h2 + .h2sub {
+    font-size: 25px; font-weight: 700; letter-spacing: -0.015em; margin: 16px 0 8px;
+    line-height: 1.25; text-wrap: balance;
+  }
+  h3 { font-size: 16.5px; font-weight: 650; margin: 34px 0 4px; }
+  p { margin: 13px 0; }
+  ul, ol { margin: 13px 0; padding-left: 22px; }
+  li { margin: 6px 0; }
+  code {
+    font-family: var(--mono); font-size: 0.87em; background: var(--panel-2);
+    padding: 1.5px 5px; border-radius: 2px;
+  }
+  .n { font-family: var(--mono); font-weight: 650; font-variant-numeric: tabular-nums; }
+
+  /* spec strip: what this factor changed, and what stayed put */
+  .spec {
+    display: flex; flex-wrap: wrap; gap: 0; margin: 22px 0 6px;
+    border: 1px solid var(--rule); background: var(--panel);
+  }
+  .spec div { padding: 11px 18px; border-right: 1px solid var(--rule); }
+  .spec div:last-child { border-right: none; }
+  .spec dt {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--ink-3); margin: 0 0 3px;
+  }
+  .spec dd { margin: 0; font-size: 14.5px; font-family: var(--mono); font-weight: 600; }
+  .spec div.vary { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+  .spec div.vary dt { color: var(--accent); }
+
+  figure { margin: 26px 0 34px; }
+  .figbox {
+    background: var(--panel); border: 1px solid var(--rule); padding: 16px 16px 8px;
+    overflow-x: auto;
+  }
+  svg.fig { display: block; width: 100%; height: auto; min-width: 760px; }
+  figcaption { font-size: 13px; color: var(--ink-2); margin-top: 11px; max-width: 88ch; }
+
+  .tablebox { overflow-x: auto; margin: 22px 0; }
+  table { border-collapse: collapse; font-size: 14px; width: 100%; min-width: 620px; }
+  th, td { text-align: left; padding: 8px 12px 8px 0; border-bottom: 1px solid var(--rule); }
+  th {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 600; border-bottom: 1px solid var(--rule-2);
+  }
+  td.n2 { font-family: var(--mono); text-align: right; padding-right: 20px;
+          font-variant-numeric: tabular-nums; }
+  th.n2 { text-align: right; padding-right: 20px; }
+  tr.base td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  tr.grp td {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--ink-3); padding-top: 16px; border-bottom: 1px solid var(--rule-2);
+  }
+
+  .note {
+    background: var(--panel); border: 1px solid var(--rule); border-left: 3px solid var(--accent);
+    padding: 14px 18px; margin: 22px 0; font-size: 14.5px;
+  }
+  .note p:first-child { margin-top: 0; } .note p:last-child { margin-bottom: 0; }
+
+  pre {
+    background: var(--panel-2); border: 1px solid var(--rule); padding: 14px 16px;
+    overflow-x: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.65;
+  }
+  pre code { background: none; padding: 0; }
+  footer { margin-top: 72px; padding-top: 20px; border-top: 1px solid var(--rule);
+           font-size: 13px; color: var(--ink-3); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+
+<div class="wrap">
+
+<header class="top">
+  <p class="kicker">Mazu · AuroraSmallTW · 1 h 模型 · 邊界條件掃描</p>
+  <h1>邊界條件的 6 小時誤差爆增</h1>
+  <p class="lede">
+    只針對<strong>邊界</strong>。掃三個變因 —— 解析度、厚度、來源 —— 每個都用
+    <strong>MAE、embedding distance、FID、波數譜</strong>四個面向看，
+    並且分<strong>單日</strong>（24 條 rollout）與<strong>月平均</strong>（744 條）兩種時間尺度。
+    來源那一組多放了一條控制線：<strong>ERA5 真值但只給 6 小時一格</strong>，
+    用來把「取樣頻率」和「預報誤差」拆開。
+    結果直接呈現，波數譜獨立成一節。
+  </p>
+</header>
+
+<section>
+<h2>Scope</h2>
+<p class="h2sub">這份報告在測什麼</p>
+<div class="prose">
+<p>
+  1 小時模型在 05 / 11 / 17 / 23 UTC 出現的誤差爆增來自邊界。
+  這裡不再重複論證那件事，而是把邊界本身的三個可調參數各掃一遍，看爆增的幅度怎麼變。
+</p>
+</div>
+
+<div class="tablebox">
+<table>
+<thead><tr><th>設定</th><th>來源</th><th class="n2">厚度</th><th class="n2">解析度</th><th>屬於哪個變因</th></tr></thead>
+<tbody>__CONFIG_TABLE__</tbody>
+</table>
+</div>
+
+<div class="prose">
+<p>沒有掃到的參數一律固定在預設值：</p>
+</div>
+<div class="spec">
+  <div><dt>apply mode</dt><dd>direct</dd></div>
+  <div><dt>time interp</dt><dd>nearest</dd></div>
+  <div><dt>replace at</dt><dd>backbone</dd></div>
+  <div><dt>pooling</dt><dd>off</dd></div>
+  <div><dt>timestep</dt><dd>1 h</dd></div>
+  <div><dt>rollout</dt><dd>168 h</dd></div>
+</div>
+
+<h3>兩種時間尺度</h3>
+<div class="prose">
+<ul>
+  <li><b>單日</b> —— 2020-03-01，起報時刻涵蓋當天 24 個整點，共 <span class="n">24</span> 條 rollout。</li>
+  <li><b>月平均</b> —— 2020-03，<b>每天的每個整點都起報</b>，
+      共 <span class="n">31 × 24 = 744</span> 條 rollout，
+      再依<b>第 n 個小時</b>（valid time 的 UTC 整點）合併平均。</li>
+</ul>
+<p>
+  每條 rollout 都跑 <b>168 小時</b>。
+  clock-hour 那幾張圖與總表<b>固定用 lead 1–48 的窗口</b>統計，
+  這樣每個 clock hour 分箱的 lead 組成完全一樣、日與月可以直接對比，FID 也才有定義；
+  每一節最後那張 <b>MAE 對 lead time</b> 的圖則用完整的 1–168。
+  8 個設定 × 744 條 × 168 步，月尺度這一輪是
+  <span class="n">100 萬</span> 個 model step。
+</p>
+</div>
+
+<h3>四個指標怎麼算</h3>
+<div class="prose">
+<ul>
+  <li><b>MAE</b> —— 對 ERA5 逐時分析場。一律取<b>共同內部</b>：四邊各去掉 16 格
+      （最寬的那個設定的厚度）。不這樣做的話，厚度掃描等於在比「哪個設定用邊界資料蓋掉了比較多格點」，
+      而不是在比預報品質。</li>
+  <li><b>Embedding distance</b> —— 預報與 ERA5 各自組成 2 步視窗，
+      過 encoder 取 backbone bottleneck，算 <code>1 − cos</code>。</li>
+  <li><b>FID</b> —— 同一組 bottleneck 特徵做 mean-pool，全域 PCA 降到 32 維，
+      逐 clock hour 算預報雲與 ERA5 雲的 Fréchet 距離。
+      因為起報涵蓋整整一天，每個 clock hour 分箱的 lead 組成一致，可以直接比。</li>
+  <li><b>波數譜</b> —— 沿用 <code>plot_wavenumber.py</code> 的定義：去掉邊界、扣掉空間平均、
+      2D FFT 取絕對值、沿緯度平均，留正的東西向波數。同樣在共同內部上算。</li>
+</ul>
+</div>
+</section>
+
+<section>
+<h2>Factor 1</h2>
+<p class="h2sub">邊界解析度</p>
+<div class="spec">
+  <div class="vary"><dt>varying</dt><dd>0.25° / 0.5° / 1.5°</dd></div>
+  <div><dt>source</dt><dd>hres</dd></div>
+  <div><dt>width</dt><dd>8</dd></div>
+  <div><dt>apply</dt><dd>direct</dd></div>
+</div>
+<div class="prose">
+<p>
+  0.25° 是原生網格；0.5° 由 0.25° 平均池化再以區塊複製放回（<code>direct</code>）；
+  1.5° 讀的是原生的 1.5° 資料集再最近鄰重新取樣到模型網格。
+</p>
+</div>
+<figure>
+  <div class="figbox">__FIG:fig_resolution__</div>
+  <figcaption>左到右：內部 MAE(msl) 絕對值、除以同 lead 平均後的形狀、embedding distance、FID。
+  上排單日、下排月平均。虛線為 05/11/17/23 UTC。</figcaption>
+</figure>
+<div class="prose">
+__READ_resolution__
+</div>
+<figure>
+  <div class="figbox">__FIG:fig_resolution_mae__</div>
+  <figcaption>MAE 對 lead time，跑到 <b>168 小時</b>，draw_figure.sh 那張 3×3 關鍵變數圖的同款。月尺度（744 條 rollout）平均，一樣取共同內部（各邊去 16 格）。注意上面幾張 clock-hour 圖是固定用 lead 1–48 的窗口統計的（讓每個分箱的 lead 組成一致、FID 才有定義），這張則用完整的 1–168。</figcaption>
+</figure>
+</section>
+
+<section>
+<h2>Factor 2</h2>
+<p class="h2sub">邊界厚度</p>
+<div class="spec">
+  <div class="vary"><dt>varying</dt><dd>4 / 8 / 12 / 16</dd></div>
+  <div><dt>source</dt><dd>hres</dd></div>
+  <div><dt>resolution</dt><dd>0.25°</dd></div>
+  <div><dt>apply</dt><dd>direct</dd></div>
+</div>
+<div class="prose">
+<p>
+  厚度是在 latent 網格上生效的：<code>latent_width = boundary_width / patch_size</code>，
+  patch size 為 4，所以 4 / 8 / 12 / 16 對應 latent 的 1 / 2 / 3 / 4 圈。
+  MAE 一律在去掉 16 格的共同內部上計算，四個設定比的是同一塊區域。
+</p>
+</div>
+<figure>
+  <div class="figbox">__FIG:fig_width__</div>
+  <figcaption>欄位同上。注意 MAE 是在共同內部（各邊去 16 格）算的，
+  所以厚度大的設定並沒有因為「蓋掉比較多格點」而佔便宜。</figcaption>
+</figure>
+<div class="prose">
+__READ_width__
+</div>
+<figure>
+  <div class="figbox">__FIG:fig_width_mae__</div>
+  <figcaption>MAE 對 lead time，跑到 <b>168 小時</b>，draw_figure.sh 那張 3×3 關鍵變數圖的同款。月尺度（744 條 rollout）平均，一樣取共同內部（各邊去 16 格）。注意上面幾張 clock-hour 圖是固定用 lead 1–48 的窗口統計的（讓每個分箱的 lead 組成一致、FID 才有定義），這張則用完整的 1–168。</figcaption>
+</figure>
+</section>
+
+<section>
+<h2>Factor 3</h2>
+<p class="h2sub">邊界來源</p>
+<div class="spec">
+  <div class="vary"><dt>varying</dt><dd>hres / gt / gt6</dd></div>
+  <div><dt>width</dt><dd>8</dd></div>
+  <div><dt>resolution</dt><dd>0.25°</dd></div>
+  <div><dt>apply</dt><dd>direct</dd></div>
+</div>
+<div class="prose">
+<p>
+  HRES 和 ground truth 差了<b>兩件事</b>：HRES 是<b>預報</b>（帶預報誤差），而且是
+  <b>6 小時一格</b>（<code>nearest</code> 把它變成階梯）。單純比這兩者，分不出爆增是哪一個造成的。
+</p>
+<p>所以這裡放三條線：</p>
+<ul>
+  <li><code>base</code> —— HRES 預報，6 小時一格，起報 00Z / 12Z。</li>
+  <li><code>gt</code> —— ERA5 分析場，<b>逐時</b>，和評分真值同一份資料、時間完全對齊。
+      時間解析度與對齊都完美，是對照上限。</li>
+  <li><code>gt6</code> —— <b>一樣是 ERA5 分析場，但只給 6 小時一格</b>，
+      而且錨在和 HRES 相同的 00Z / 12Z 網格上，一樣用 <code>nearest</code> 取。
+      場是完美的，只有取樣被打回 6 小時。</li>
+</ul>
+<p>
+  <code>gt6</code> 就是把「6 小時取樣」和「預報誤差」拆開的控制組：
+  它若出現爆增，代表<b>取樣本身</b>就足夠造成，跟資料準不準無關。
+</p>
+</div>
+<figure>
+  <div class="figbox">__FIG:fig_source__</div>
+  <figcaption>欄位同上。</figcaption>
+</figure>
+<div class="prose">
+__READ_source__
+</div>
+<figure>
+  <div class="figbox">__FIG:fig_source_mae__</div>
+  <figcaption>MAE 對 lead time，跑到 <b>168 小時</b>，draw_figure.sh 那張 3×3 關鍵變數圖的同款。月尺度（744 條 rollout）平均，一樣取共同內部（各邊去 16 格）。注意上面幾張 clock-hour 圖是固定用 lead 1–48 的窗口統計的（讓每個分箱的 lead 組成一致、FID 才有定義），這張則用完整的 1–168。</figcaption>
+</figure>
+</section>
+
+<section>
+<h2>Spectra</h2>
+<p class="h2sub">波數譜</p>
+<div class="prose">
+<p>
+  與前三節分開。每張圖左、中兩欄是預報譜除以 ERA5 譜（比值 &gt; 1 表示該波段能量偏多），
+  右欄把高波數段（最高 20 個波數）的比值攤在 clock hour 上，
+  用來看小尺度能量有沒有跟著 6 小時的邊界節奏起伏。
+</p>
+</div>
+<figure>
+  <div class="figbox">__FIG:fig_resolution_wavenumber__</div>
+  <figcaption>變因一：邊界解析度。</figcaption>
+</figure>
+<figure>
+  <div class="figbox">__FIG:fig_width_wavenumber__</div>
+  <figcaption>變因二：邊界厚度。</figcaption>
+</figure>
+<figure>
+  <div class="figbox">__FIG:fig_source_wavenumber__</div>
+  <figcaption>變因三：邊界來源。</figcaption>
+</figure>
+<div class="prose">
+__READ_wavenumber__
+</div>
+</section>
+
+<section>
+<h2>Numbers</h2>
+<p class="h2sub">總表</p>
+<div class="prose">
+<p>
+  <code>burst/rest</code> 是 05/11/17/23 四個小時的平均除以其餘 20 小時的平均
+  （都先除以同 lead 平均去掉 lead 趨勢），<b>等於 1 就是沒有 6 小時爆增</b>。
+  <code>peak/trough</code> 是同一條 clock-hour 曲線的最大除以最小。
+</p>
+</div>
+<div class="tablebox">
+<table>
+<thead>
+<tr><th>設定</th>
+    <th class="n2">MAE msl</th><th class="n2">MAE z</th><th class="n2">1−cos</th>
+    <th class="n2">burst/rest</th><th class="n2">peak/trough</th>
+    <th class="n2">MAE msl</th><th class="n2">MAE z</th><th class="n2">1−cos</th>
+    <th class="n2">burst/rest</th><th class="n2">peak/trough</th></tr>
+<tr><th></th><th class="n2" colspan="5" style="text-align:left;color:var(--accent)">單日 2020-03-01</th>
+    <th class="n2" colspan="5" style="text-align:left;color:var(--accent)">月平均 2020-03</th></tr>
+</thead>
+<tbody>__SUMMARY_TABLE__</tbody>
+</table>
+</div>
+</section>
+
+<section>
+<h2>Appendix</h2>
+<p class="h2sub">Ground truth 邊界改走 HRES 的加速路徑</p>
+<div class="prose">
+<p>
+  順手改掉的。原本 <code>BoundaryConditionDataset_GroundTruth</code> 標記
+  <code>uses_forecast_source = False</code>，所以 pipeline 走的是泛用的絕對時間路徑：
+  沒開 <code>--gpu_cache</code> 時每一個 rollout step 都要重新讀一次 netCDF。
+</p>
+<p>
+  其實一份 ground truth source 本來就涵蓋整條軌跡（<code>base_time</code> 加上每一個要求的位移），
+  形狀和 HRES 的 forecast source 一樣，所以可以走同一條快速路徑。改動：
+</p>
+<ul>
+  <li>source 多帶一個 <code>prediction_timedelta_hours</code> 張量，時間軸變成可放在 GPU 上的 float，
+      選格變成純 torch 運算。</li>
+  <li><code>uses_forecast_source = True</code>。</li>
+  <li>新增 <code>effective_base_time()</code>：預報型來源遇到歷史時刻要退回前一個 cycle，
+      ground truth 自己就涵蓋負的位移、base 永遠不動。兩個 pipeline 改成呼叫這個方法，
+      不再各自寫死那段判斷。</li>
+  <li><code>create_boundary_dataset</code> 對 ground truth 產生的位移改為<b>正好是 rollout 會問的那些</b>，
+      含輸入視窗的負位移。</li>
+</ul>
+<p>
+  驗證：所有時刻、所有變數，新舊兩條路徑取出的場<b>逐位元相同</b>（max diff <span class="n">0.0</span>）。
+  每個 boundary step 的成本從 <span class="n">82.7 ms</span> 降到
+  <span class="n">0.78 ms</span>（<span class="n">105×</span>）；
+  一次 120 步的 rollout，邊界部分從 <span class="n">10.0 s</span> 降到 <span class="n">1.65 s</span>。
+</p>
+</div>
+
+<h3>重跑</h3>
+<pre><code>cd /tmp3/b12902101/Mazu/boundary_study
+python run_boundary_study.py --scale day   --rollout_step 168 --batch_size 6 --gpus 0,1,2,3,4,5,6,7
+python run_boundary_study.py --scale month --rollout_step 168 --batch_size 6 --gpus 0,1,2,3,4,5,6,7
+python analyse.py</code></pre>
+<div class="prose">
+<p>
+  產出在 <code>boundary_study/data/</code>：
+  <code>metrics_{scale}_{config}.csv</code>（逐 init、逐 lead）、
+  <code>emb_*.npz</code>（FID 用的 bottleneck 特徵）、
+  <code>spec_*.npz</code>（波數譜）、<code>summary.json</code>。
+  圖在 <code>boundary_study/figs/</code>。
+</p>
+</div>
+</section>
+
+<footer>
+  資料：ERA5 逐時分析（真值與 ground truth 邊界）、ECMWF HRES 預報（0.25° 與 1.5°）。
+  模型 <code>AuroraSmall</code>、<code>timestep = 1 h</code>、<code>input_time_window = 2</code>、無 LoRA、
+  checkpoint <code>lateral_smooth/model_weights/Aurora/model.safetensors</code>。
+</footer>
+
+</div>
