@@ -19,6 +19,8 @@ USE_SWIGLU_FFN=0
 USE_ROPE_EMBEDDING=0
 RANDOM_MLP=0
 EPOCHS=${EPOCHS:-50}
+# DataLoader workers per GPU process; 1 is enough since H2D transfer is the bottleneck.
+NUM_WORKERS=${NUM_WORKERS:-1}
 # Local pretrained weights (.safetensors, loaded via safetensors.load_file).
 CHECKPOINT_PATH=${CHECKPOINT_PATH:-}
 
@@ -186,7 +188,7 @@ accelerate launch --config_file ./public_bash_scripts/accelerate_training_config
     --warmup_step_ratio 0.1 \
     --train_batch_size 8 \
     --val_batch_size 8 \
-    --num_workers "${GPU_COUNT}" \
+    --num_workers "${NUM_WORKERS}" \
     --checkpointing_epochs 25 \
     --report_to wandb \
     --tracker_project_name "${PROJECT}" \
