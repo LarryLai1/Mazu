@@ -165,8 +165,12 @@ def create_model(
         model.load_checkpoint("microsoft/aurora", "aurora-0.25-small-pretrained.ckpt", strict = False)
     elif args.checkpoint_path:
         logger.info(f"Loading checkpoint: {args.checkpoint_path}")
-        state_dict = load_file(args.checkpoint_path)
-        model.load_state_dict(state_dict, strict = False)
+        if args.checkpoint_path.endswith(".ckpt"):
+            # Official Microsoft Aurora checkpoint (torch format); same path as --use_pretrained_weight.
+            model.load_checkpoint_local(args.checkpoint_path, strict = False)
+        else:
+            state_dict = load_file(args.checkpoint_path)
+            model.load_state_dict(state_dict, strict = False)
     if args.random_mlp and (args.use_pretrained_weight or args.checkpoint_path):
         _random_init_mlp_blocks(model)
     return model

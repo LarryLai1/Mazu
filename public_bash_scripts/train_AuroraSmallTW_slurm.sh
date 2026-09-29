@@ -1,7 +1,7 @@
 #!/bin/bash
 # Slurm version of train_AuroraSmallTW.sh (1 node, 8x H200).
 # Submit from the repo root:
-#   sbatch public_bash_scripts/train_AuroraSmallTW_slurm.sh --checkpoint /path/to/model.safetensors [options]
+#   sbatch public_bash_scripts/train_AuroraSmallTW_slurm.sh [--checkpoint /path/to/weights] [options]
 #SBATCH --job-name=Mazu_train
 #SBATCH --account=mst115137
 #SBATCH --partition=8gpus
@@ -22,8 +22,9 @@ EPOCHS=${EPOCHS:-50}
 # DataLoader workers per GPU process. Loading is bound by opening many small netCDF
 # files per sample, so read them in parallel (8 GPUs x (1 + 4) procs fits 48 CPUs).
 NUM_WORKERS=${NUM_WORKERS:-4}
-# Local pretrained weights (.safetensors, loaded via safetensors.load_file).
-CHECKPOINT_PATH=${CHECKPOINT_PATH:-}
+# Local pretrained weights: .safetensors (safetensors.load_file) or official Aurora .ckpt
+# (model.load_checkpoint_local). Defaults to the official AuroraSmall pretrained checkpoint.
+CHECKPOINT_PATH=${CHECKPOINT_PATH:-/work/b12902101/checkpoints/aurora/aurora-0.25-small-pretrained.ckpt}
 
 ENV_PREFIX="/home/b12902101/micromamba/envs/AS"
 DATA_ROOT_DIR="/work/b12902101/era5_tw"
@@ -33,7 +34,8 @@ print_usage() {
 Usage: sbatch public_bash_scripts/train_AuroraSmallTW_slurm.sh [options]
 
 Options:
-    --checkpoint PATH         Pretrained weights (.safetensors); required
+    --checkpoint PATH         Pretrained weights (.safetensors or .ckpt)
+                              (default: official aurora-0.25-small-pretrained.ckpt)
     --use-muon                Enable Muon
     --use-swiglu              Enable SwiGLU FFN
     --use-rope                Enable RoPE embedding
@@ -96,7 +98,7 @@ fi
 cd "${REPO_ROOT}"
 
 if [[ -z "${CHECKPOINT_PATH}" ]]; then
-    echo "No pretrained weights given: pass --checkpoint /path/to/model.safetensors." >&2
+    echo "No pretrained weights given: pass --checkpoint /path/to/weights (.safetensors or .ckpt)." >&2
     exit 2
 fi
 if [[ ! -f "${CHECKPOINT_PATH}" ]]; then
