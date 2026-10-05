@@ -10,7 +10,7 @@
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=48
 #SBATCH --time=2-00:00:00
-#SBATCH --output=%x_%j.out
+#SBATCH --output=slurm_results/%x_%j.out
 
 set -euo pipefail
 
@@ -27,7 +27,7 @@ NUM_WORKERS=${NUM_WORKERS:-4}
 CHECKPOINT_PATH=${CHECKPOINT_PATH:-/work/b12902101/checkpoints/aurora/aurora-0.25-small-pretrained.ckpt}
 # HRES +6h forecasts (6-hourly inits) used to replace the outer ring of the training/validation
 # inputs, matching inference's input-space boundary replacement. Empty value disables it.
-BOUNDARY_ROOT_DIR=${BOUNDARY_ROOT_DIR-/tmp2/b12902101/hres_tw_forecast_0.25deg}
+BOUNDARY_ROOT_DIR=${BOUNDARY_ROOT_DIR-/work/b12902101/hres_tw_forecast_0.25deg}
 BOUNDARY_WIDTH=${BOUNDARY_WIDTH:-8}
 BOUNDARY_SMOOTH_MODE=${BOUNDARY_SMOOTH_MODE:-no}
 BOUNDARY_TIME_INTERP_MODE=${BOUNDARY_TIME_INTERP_MODE:-nearest}
@@ -158,7 +158,7 @@ export PATH="${ENV_PREFIX}/bin:${PATH}"
 # The training script lives in reference_artifact/ but imports repo-root packages.
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
-PROJECT="Mazu"
+PROJECT="Boundary"
 NAME_SUFFIX=()
 if [[ "$USE_MUON" == "1" ]]; then
     NAME_SUFFIX+=("Muon")
@@ -217,8 +217,8 @@ accelerate launch --config_file ./public_bash_scripts/accelerate_training_config
     --data_root_dir "${DATA_ROOT_DIR}" \
     --output_dir "${OUTPUT_DIR}" \
     --seed 1126 \
-    --train_start_date_hour "2013-01-01 00:00:00" \
-    --train_end_date_hour "2018-12-31 23:00:00" \
+    --train_start_date_hour "2016-01-01 00:00:00" \
+    --train_end_date_hour "2020-12-31 23:00:00" \
     --val_start_date_hour "2022-01-01 00:00:00" \
     --val_end_date_hour "2022-12-31 23:00:00" \
     --surface_variables t2m u10 v10 msl \

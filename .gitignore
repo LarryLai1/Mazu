@@ -5,7 +5,7 @@ slurm_scripts
 slurm_outputs
 __pycache__
 *.safetensors
-Mazu_training_results/*
+*_training_results/*
 my_validation_plots/*
 checkpoint-50/
 errs/
