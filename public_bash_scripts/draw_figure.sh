@@ -1,4 +1,4 @@
-root_dir="../LAM_output"
+root_dir="../LAM_output_preds"
 var_dir="${root_dir}"
 suffix="MAE.csv"
 colors=("#FF0000" "#006000" "#00EC00" "#C07AB8" "#8600FF")
@@ -20,10 +20,11 @@ hres_boundary_root="/tmp3/b12902101/hres_tw_forecast_0.25deg"
 hres_boundary_root_15="/tmp3/b12902101/hres_tw_forecast_1.5deg"
 
 smooth="no"
-bd_position="backbone"
+bd_position="input"
+# bd_position="backbone"
 interp="nearest"
-# resols=(0.25)
-resols=(0.25 0.5 1.5)
+resols=(0.25)
+# resols=(0.25 0.5 1.5)
 
 # Cap the highest forecast lead time shown in the plots (hours). The CSVs still hold every
 # lead time; this only trims the x-axis at draw time. Leave empty to plot all available hours.
@@ -61,13 +62,29 @@ for index in 0; do
     styles+=("linestyle=-,linewidth=2,color=${colors[${index}]}")
 done
 
+# # Model rollouts driven by each boundary variant.
+# for index in "${!resols[@]}"; do
+#     for apply_mode in "direct" "interp"; do
+#         resol="${resols[${index}]}"
+#         if [ "${resol}" = 0.25 ] && [ "${apply_mode}" = "interp" ]; then
+#             continue
+#         fi
+#         csv_paths+=("${var_dir}/hres_boundary8_${smooth}_${interp}_${bd_position}_res${resol}_${apply_mode}/${suffix}")
+#         legend_names+=("Boundary 8 ${interp} ${smooth} ${bd_position} ${resol} ${apply_mode}")
+#         if [ "${apply_mode}" == "interp" ]; then
+#             styles+=("linestyle=--,linewidth=2,color=${colors[${index}]}")
+#         else
+#             styles+=("linestyle=:,linewidth=2,color=${colors[${index}]}")
+#         fi
+#     done
+# done
+
+bd_positions=("input" "backbone")
+resol=0.25
 # Model rollouts driven by each boundary variant.
-for index in "${!resols[@]}"; do
-    for apply_mode in "direct" "interp"; do
-        resol="${resols[${index}]}"
-        if [ "${resol}" = 0.25 ] && [ "${apply_mode}" = "interp" ]; then
-            continue
-        fi
+for index in "${!bd_positions[@]}"; do
+    for apply_mode in "direct"; do
+        bd_position="${bd_positions[${index}]}"
         csv_paths+=("${var_dir}/hres_boundary8_${smooth}_${interp}_${bd_position}_res${resol}_${apply_mode}/${suffix}")
         legend_names+=("Boundary 8 ${interp} ${smooth} ${bd_position} ${resol} ${apply_mode}")
         if [ "${apply_mode}" == "interp" ]; then

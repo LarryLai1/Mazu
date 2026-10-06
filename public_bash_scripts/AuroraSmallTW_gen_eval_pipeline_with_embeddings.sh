@@ -31,7 +31,7 @@ boundary_width=2
 boundary_smooth_mode="no"
 boundary_smooth_width_adjustment=0
 boundary_time_interp_mode="interpolation"
-replace_boundary_position="encoder"
+replace_boundary_position="backbone"
 boundary_resolution="0.25"
 boundary_lowres_apply_mode="interp"
 pred="false"
@@ -111,12 +111,12 @@ MODEL_CKPT_PATH="/tmp2/yuanlim0919/lateral_smooth/model_weights/Aurora/model.saf
 batch_size=8
 if [[ "${pred}" == "true" ]]; then
     start_time="2020-03-01 00:00:00"
-    end_time="2020-03-31 23:00:00"
+    end_time="2020-03-01 00:00:00"
     extra_args=("--save_rollout_step" 72)
     output_root="/tmp3/b12902101/LAM_output_preds"
 else
-    start_time="2020-03-10 00:00:00"
-    end_time="2020-03-31 23:00:00"
+    start_time="2021-03-01 00:00:00"
+    end_time="2021-03-10 23:00:00"
     extra_args=()
     output_root="/tmp3/b12902101/LAM_output"
 fi
@@ -134,7 +134,7 @@ OUTPUT_FOLDER_NAME="${output_root}/${boundary_source}_boundary${boundary_width}_
 # Embedding output is kept OUTSIDE Mazu/, tagged with the same run-config suffix as
 # OUTPUT_FOLDER_NAME above so multiple configs (e.g. baseline vs. boundary-replacement) can
 # later be compared side by side in plot_embedding_tsne_hooked.py via --embeddings_dirs/--labels.
-EMBEDDING_OUTPUT_ROOT="/tmp3/b12902101/mazu_embedding_output"
+EMBEDDING_OUTPUT_ROOT="/tmp3/b12902101/finetuned_embedding_output"
 RUN_CONFIG_SUFFIX="${boundary_source}_boundary${boundary_width}_${replace_boundary_position}_res${boundary_resolution}_${boundary_lowres_apply_mode}"
 EMBEDDING_OUTPUT_DIR="${EMBEDDING_OUTPUT_ROOT}/embeddings/${RUN_CONFIG_SUFFIX}"
 # On-the-fly cos/L2-vs-ERA5 curves. Same run-config suffix, so several configs can be compared
@@ -203,7 +203,7 @@ python ./AuroraSmallTW_gen_eval_pipeline_with_embeddings.py \
     --longitude 100 144.75 \
     --lead_time 1 \
     --input_time_window 2 \
-    --rollout_step 169 \
+    --rollout_step 168 \
     --timestep_hours 1 \
     --boundary_width ${boundary_width} \
     --boundary_source ${boundary_source} \

@@ -24,6 +24,7 @@ from datasets.ERA5TWDatasetforAurora import ERA5TWDatasetforAurora, NETCDF_IO_LO
 from datasets.BoundaryConditionDataset import BoundaryConditionDataset_Aurora, BoundaryConditionDataset_HRES, BoundaryConditionDataset_GroundTruth
 from utils.metrics import AuroraMAELoss, AuroraMSELoss
 from utils.metrics import prepare_each_lead_time_agg
+from utils.boundary_replacement import replace_input_boundary
 
 from pathlib import Path
 
@@ -87,9 +88,12 @@ def parse_args():
         "--replace_boundary_position",
         type = str,
         nargs = "+",
-        choices = ["encoder", "backbone"],
+        choices = ["input", "encoder", "backbone"],
         default = [],
-        help = "Select where to replace the boundary latents.",
+        help = "Select where to replace the boundary. input = replace the boundary ring of the "
+               "physical input fields (before normalisation/encoding); encoder = replace in "
+               "latent space after the encoder; backbone = replace in latent space at the last "
+               "backbone stage.",
     )
     parser.add_argument(
         "--boundary_resolution",
@@ -806,12 +810,14 @@ def model_forward_with_latent_boundary(model, batch_main, batch_bc, args):
 
     p = next(model.parameters())
 
-    def prepare_and_encode(batch):
+    def prepare_batch(batch):
         batch = model.batch_transform_hook(batch)
         batch = batch.type(p.dtype)
-        batch = batch.normalise(surf_stats=model.surf_stats)
         batch = batch.crop(patch_size=model.patch_size)
-        batch = batch.to(p.device)
+        return batch.to(p.device)
+
+    def encode_prepared(batch):
+        batch = batch.normalise(surf_stats=model.surf_stats)
 
         B, T = next(iter(batch.surf_vars.values())).shape[:2]
         static_vars = {}
@@ -849,11 +855,28 @@ def model_forward_with_latent_boundary(model, batch_main, batch_bc, args):
         )
         return x, batch
 
-    x_main, prepped_batch_main = prepare_and_encode(batch_main)
-    
+    # Physical-space ("input") boundary replacement happens on the main batch before
+    # normalisation / encoding; the boundary batch is only encoded for the latent modes.
+    prepped_main = prepare_batch(batch_main)
+    if batch_bc is not None and "input" in args.replace_boundary_position:
+        prepped_bc = prepare_batch(batch_bc)
+        prepped_main = dataclasses.replace(
+            prepped_main,
+            surf_vars={
+                k: replace_input_boundary(v, prepped_bc.surf_vars[k], args.boundary_width, args.boundary_smooth_mode)
+                for k, v in prepped_main.surf_vars.items()
+            },
+            atmos_vars={
+                k: replace_input_boundary(v, prepped_bc.atmos_vars[k], args.boundary_width, args.boundary_smooth_mode)
+                for k, v in prepped_main.atmos_vars.items()
+            },
+        )
+
+    x_main, prepped_batch_main = encode_prepared(prepped_main)
+
     x_bc = None
     if batch_bc is not None and any(pos in args.replace_boundary_position for pos in ["encoder", "backbone"]):
-        x_bc, _ = prepare_and_encode(batch_bc)
+        x_bc, _ = encode_prepared(prepare_batch(batch_bc))
         
     if x_bc is not None and "encoder" in args.replace_boundary_position:
         B, L_tokens, D = x_main.shape

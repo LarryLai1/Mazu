@@ -25,11 +25,11 @@ needed_vars = sorted(rename_map.keys())
 
 # lat = slice(0, 45)
 # lon = slice(95, 150)
-lat = slice(2.5, 41.25)
-lon = slice(97.5, 147.25)
-time = slice("2020-09-01T00:00:00.000000000", "2020-12-31T23:00:00.000000000")
+lat = slice(5, 39.75)
+lon = slice(100, 144.75)
+time = slice("2021-02-01T00:00:00.000000000", "2021-02-28T23:00:00.000000000")
 # pred_time = slice(0, 78)
-pred_time = slice(0, 240)
+pred_time = slice(0, 175)
 levels = [1000, 925, 850, 700, 500, 300, 150, 50]
 
 # NOTE: this pulls ECMWF HRES forecasts, not ERA5 reanalysis. The boundary forecast archive
@@ -61,8 +61,7 @@ def split_and_save_by_date(ds, out_root, time_values=None, limit=None):
         time_values = ds["time"].values
     count = 0
     buckets = {}
-    bar_format = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]"
-    for init_time in tqdm(time_values, desc="Init time", unit="init", bar_format=bar_format):
+    for init_time in time_values:
         ds_step = ds.sel(time=[init_time])
         ds_step = ds_step.rename({
             k: v for k, v in rename_map.items() if k in ds_step.data_vars
@@ -96,14 +95,21 @@ def split_and_save_by_date(ds, out_root, time_values=None, limit=None):
     _flush_buckets(buckets)
 
 def _flush_buckets(buckets):
-    for ymd, payload in buckets.items():
-        month_dir = payload["dir"]
-        if payload["sfc"]:
-            ds_sfc_day = xr.concat(payload["sfc"], dim="time").sortby("time")
-            ds_sfc_day.to_netcdf(month_dir / f"{ymd}_sfc.nc")
-        if payload["upper"]:
-            ds_upper_day = xr.concat(payload["upper"], dim="time").sortby("time")
-            ds_upper_day.to_netcdf(month_dir / f"{ymd}_upper.nc")
+    total = sum(bool(p["sfc"]) + bool(p["upper"]) for p in buckets.values())
+    bar_format = "{l_bar}{bar}| {n_fmt}/{total_fmt} files, {postfix} [{elapsed}<{remaining}]"
+    with tqdm(total=total, desc="NC files", unit="file", bar_format=bar_format) as pbar:
+        pbar.set_postfix_str(f"{total} left")
+        for ymd, payload in buckets.items():
+            month_dir = payload["dir"]
+            for kind in ("sfc", "upper"):
+                if not payload[kind]:
+                    continue
+                fname = f"{ymd}_{kind}.nc"
+                pbar.set_description(f"NC files ({fname})")
+                ds_day = xr.concat(payload[kind], dim="time").sortby("time")
+                ds_day.to_netcdf(month_dir / fname)
+                pbar.update(1)
+                pbar.set_postfix_str(f"{total - pbar.n} left")
 
 # Example: limit to 2 steps for a quick sanity check
 split_and_save_by_date(ds, out_root, limit=None)
