@@ -3,7 +3,7 @@ var_dir="${root_dir}"
 suffix="MAE.csv"
 colors=("#FF0000" "#006000" "#00EC00" "#C07AB8" "#8600FF")
 
-use_baseline=true
+use_baseline=false
 if [ "${use_baseline}" = true ]; then
     csv_paths=("${root_dir}/hres_boundary0_no_nearest_backbone_res0.25_direct/${suffix}")
     styles=("linestyle=-,linewidth=2")
@@ -46,15 +46,15 @@ for index in 0; do
         python eval_hres_boundary_forecast.py \
             --boundary_root_dir "${boundary_root_dir}" \
             --data_root_dir "/tmp3/yunye0121/era5_tw" \
-            --start_date_hour "2020-03-01 00:00:00" \
-            --end_date_hour "2020-04-01 00:00:00" \
+            --start_date_hour "2021-03-01 00:00:00" \
+            --end_date_hour "2021-03-01 00:00:00" \
             --batch_size 4 \
             --num_workers 1 \
             --csv_output_folder "${bd_out_dir}" \
             --eval_metric "MAE" \
             --boundary_resolution "${resol}" \
             --boundary_lowres_apply_mode "${bd_apply_mode}" \
-            --gpus "0"
+            --gpus "2"
     fi
 
     csv_paths+=("${bd_out_dir}/${suffix}")

@@ -106,7 +106,9 @@ done
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 
-MODEL_CKPT_PATH="/tmp2/yuanlim0919/lateral_smooth/model_weights/Aurora/model.safetensors"
+MODEL_CKPT_PATH="/tmp3/b12902101/train/50-train_loss=0.02831841-val_loss=0.03047114/model.safetensors"
+# MODEL_CKPT_PATH="/tmp3/b12902101/train/full_finetune_input_200epochs/model.safetensors"
+# MODEL_CKPT_PATH="/tmp2/yuanlim0919/lateral_smooth/model_weights/Aurora/model.safetensors"
 
 batch_size=8
 if [[ "${pred}" == "true" ]]; then

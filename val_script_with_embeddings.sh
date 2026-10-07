@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_SCRIPT="${SCRIPT_DIR}/public_bash_scripts/AuroraSmallTW_gen_eval_pipeline_with_embeddings.sh"
 
 # GPU="0,1,2,3"
-GPU="0"
+GPU="2"
 
 EMBEDDING_SAVE_STEPS="${EMBEDDING_SAVE_STEPS:-1 6 24 72 120 168}"
 

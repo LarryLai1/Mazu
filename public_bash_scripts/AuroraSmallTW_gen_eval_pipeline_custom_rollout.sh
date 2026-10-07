@@ -18,7 +18,7 @@ boundary_width=2
 boundary_smooth_mode="no"
 boundary_smooth_width_adjustment=0
 boundary_time_interp_mode="interpolation"
-replace_boundary_position="backbone"
+replace_boundary_position="input"
 boundary_resolution="0.25"
 boundary_lowres_apply_mode="interp"
 pred="false"
@@ -75,14 +75,15 @@ done
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 
-MODEL_CKPT_PATH="/tmp2/yuanlim0919/lateral_smooth/model_weights/Aurora/model.safetensors"
+MODEL_CKPT_PATH="/tmp3/b12902101/train/50-train_loss=0.02831841-val_loss=0.03047114/model.safetensors"
+# MODEL_CKPT_PATH="/tmp2/yuanlim0919/lateral_smooth/model_weights/Aurora/model.safetensors"
 
 batch_size=8
 if [[ "${pred}" == "true" ]]; then
     # end_time="2020-04-01 00:00:00"
     # end_time="2020-01-02 01:00:00"
-    start_time="2020-03-01 00:00:00"
-    end_time="2020-03-31 23:00:00"
+    start_time="2021-03-01 00:00:00"
+    end_time="2021-03-01 00:00:00"
     extra_args=("--save_rollout_step" 72)
     # extra_args=("--save_rollout_step" $(seq 1 240))
     # extra_args=("--save_rollout_step" $(seq 1 24) $(seq 24 6 240))
@@ -91,8 +92,8 @@ if [[ "${pred}" == "true" ]]; then
     # CUDA_VISIBLE_DEVICES_VALUE=${CUDA_VISIBLE_DEVICES_VALUE:0:1}
     # export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 else
-    start_time="2020-03-01 00:00:00"
-    end_time="2020-03-31 23:00:00"
+    start_time="2021-03-01 00:00:00"
+    end_time="2021-03-01 00:00:00"
     extra_args=()
     output_root="/tmp3/b12902101/LAM_output"
 fi
