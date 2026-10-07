@@ -19,6 +19,19 @@ RUN_SCRIPT="${SCRIPT_DIR}/public_bash_scripts/AuroraSmallTW_gen_eval_pipeline_cu
 GPU="2,3,4,5"
 # GPU="4"
 
+# Checkpoint alias -> model.safetensors. The alias becomes the second-level output folder
+# (LAM_output*/<alias>/<config>), and draw_figure.sh refers to checkpoints by the same alias.
+declare -A CKPT_PATHS=(
+    [baseline]="/tmp2/yuanlim0919/lateral_smooth/model_weights/Aurora/model.safetensors"
+    [backbone_decoder]="/tmp3/b12902101/train/50-train_loss=0.02831841-val_loss=0.03047114/model.safetensors"
+    [input_full]="/tmp3/b12902101/train/full_finetune_input_200epochs/model.safetensors"
+)
+# Checkpoints to run; every config below is run once per checkpoint.
+CKPTS=("baseline" "backbone_decoder" "input_full")
+
+for ckpt in "${CKPTS[@]}"; do
+ckpt_args=(--checkpoint_name "${ckpt}" --checkpoint_path "${CKPT_PATHS[${ckpt}]}")
+
 interp="nearest"
 smooth="no"
 bd_position="backbone"
@@ -28,9 +41,9 @@ for resol in 0.5 1.5; do
         if [[ $resol == 0.5 && $apply_mode == "direct" ]] ; then
             continue
         fi
-        echo "Starting boundary_width=8, boundary_smoothing=${smooth}, boundary_time_interp_mode=${interp} on GPU ${GPU}..."
+        echo "Starting ckpt=${ckpt}, boundary_width=8, boundary_smoothing=${smooth}, boundary_time_interp_mode=${interp} on GPU ${GPU}..."
         LOG_FILE="./bash_outputs/hres_custom_rollout_8_${smooth}_${interp}_${bd_position}.log"
-        "${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width 8 \
+        "${RUN_SCRIPT}" --gpus "${GPU}" "${ckpt_args[@]}" --boundary_width 8 \
             --boundary_smooth_mode "${smooth}" \
             --boundary_time_interp_mode "${interp}" --replace_boundary_position "${bd_position}" \
             --boundary_resolution "${resol}" --boundary_lowres_apply_mode "${apply_mode}"
@@ -41,9 +54,9 @@ done
 for interp in "nearest"; do
     for smooth in "no"; do
         for bd_position in "backbone"; do
-            echo "Starting boundary_width=8, boundary_smoothing=${smooth}, boundary_time_interp_mode=${interp} on GPU ${GPU}..."
+            echo "Starting ckpt=${ckpt}, boundary_width=8, boundary_smoothing=${smooth}, boundary_time_interp_mode=${interp} on GPU ${GPU}..."
             LOG_FILE="./bash_outputs/aurora_custom_rollout_8_${smooth}_${interp}_${bd_position}.log"
-            "${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width 8 \
+            "${RUN_SCRIPT}" --gpus "${GPU}" "${ckpt_args[@]}" --boundary_width 8 \
                 --boundary_smooth_mode "${smooth}" \
                 --boundary_time_interp_mode "${interp}" --replace_boundary_position "${bd_position}" \
                 --boundary_resolution 0.25 --boundary_lowres_apply_mode "direct" \
@@ -52,12 +65,14 @@ for interp in "nearest"; do
     done
 done
 
-"${RUN_SCRIPT}" --gpus "${GPU}" --boundary_width 0 \
+"${RUN_SCRIPT}" --gpus "${GPU}" "${ckpt_args[@]}" --boundary_width 0 \
         --boundary_smooth_mode "no" \
         --boundary_time_interp_mode "nearest" \
         --replace_boundary_position "backbone" \
         --boundary_lowres_apply_mode "direct" \
         # --pred "true"
+
+done
 
 
 ./public_bash_scripts/draw_figure.sh

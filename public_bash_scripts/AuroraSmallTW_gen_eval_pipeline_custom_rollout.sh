@@ -11,6 +11,8 @@ usage() {
     echo "  --boundary_resolution R  Boundary resolution: 0.25|0.5|1.5 (default: 0.25)" >&2
     echo "  --boundary_lowres_apply_mode M  direct|interp (default: interp)" >&2
     echo "  --pred VALUE             Enable prediction mode (true/false, default: false)" >&2
+    echo "  --checkpoint_name NAME   Checkpoint alias; outputs go to <output_root>/NAME/<config> (default: backbone_decoder)" >&2
+    echo "  --checkpoint_path PATH   model.safetensors to load (default: the backbone_decoder checkpoint)" >&2
 }
 
 CUDA_VISIBLE_DEVICES_VALUE="0,1"
@@ -22,11 +24,21 @@ replace_boundary_position="input"
 boundary_resolution="0.25"
 boundary_lowres_apply_mode="interp"
 pred="false"
+checkpoint_name="backbone_decoder"
+MODEL_CKPT_PATH="/tmp3/b12902101/train/50-train_loss=0.02831841-val_loss=0.03047114/model.safetensors"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pred)
             pred="$2"
+            shift 2
+            ;;
+        --checkpoint_name)
+            checkpoint_name="$2"
+            shift 2
+            ;;
+        --checkpoint_path)
+            MODEL_CKPT_PATH="$2"
             shift 2
             ;;
         --gpus)
@@ -75,9 +87,6 @@ done
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 
-MODEL_CKPT_PATH="/tmp3/b12902101/train/50-train_loss=0.02831841-val_loss=0.03047114/model.safetensors"
-# MODEL_CKPT_PATH="/tmp2/yuanlim0919/lateral_smooth/model_weights/Aurora/model.safetensors"
-
 batch_size=8
 if [[ "${pred}" == "true" ]]; then
     # end_time="2020-04-01 00:00:00"
@@ -107,7 +116,7 @@ boundary_source="hres"
 # boundary_source="aurora"
 
 
-OUTPUT_FOLDER_NAME="${output_root}/${boundary_source}_boundary${boundary_width}_${boundary_smooth_mode}_${boundary_time_interp_mode}_${replace_boundary_position}_res${boundary_resolution}_${boundary_lowres_apply_mode}"
+OUTPUT_FOLDER_NAME="${output_root}/${checkpoint_name}/${boundary_source}_boundary${boundary_width}_${boundary_smooth_mode}_${boundary_time_interp_mode}_${replace_boundary_position}_res${boundary_resolution}_${boundary_lowres_apply_mode}"
 
 EXPERIMENT_ID=$(basename "$(dirname "$(dirname "$MODEL_CKPT_FOLDER")")")
 CKPT_NAME=$(basename "$MODEL_CKPT_FOLDER")

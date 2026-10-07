@@ -3,11 +3,17 @@ var_dir="${root_dir}"
 suffix="MAE.csv"
 colors=("#FF0000" "#006000" "#00EC00" "#C07AB8" "#8600FF")
 
-use_baseline=false
+# Inference results live under ${root_dir}/<checkpoint alias>/<config>/ (aliases defined in val_script*.sh).
+# Checkpoints compared below (boundary 8, backbone injection), one color each.
+ckpts=("baseline" "backbone_decoder" "input_full")
+# Checkpoint whose boundary-0 (no boundary) run is drawn as the reference curve.
+baseline_ckpt="baseline"
+
+use_baseline=true
 if [ "${use_baseline}" = true ]; then
-    csv_paths=("${root_dir}/hres_boundary0_no_nearest_backbone_res0.25_direct/${suffix}")
-    styles=("linestyle=-,linewidth=2")
-    legend_names=("Baseline")
+    csv_paths=("${root_dir}/${baseline_ckpt}/hres_boundary0_no_nearest_backbone_res0.25_direct/${suffix}")
+    styles=("linestyle=-,linewidth=2,color=#000000")
+    legend_names=("${baseline_ckpt} Boundary 0")
 else
     csv_paths=()
     styles=()
@@ -79,20 +85,15 @@ done
 #     done
 # done
 
-bd_positions=("input" "backbone")
+bd_position="backbone"
 resol=0.25
-# Model rollouts driven by each boundary variant.
-for index in "${!bd_positions[@]}"; do
-    for apply_mode in "direct"; do
-        bd_position="${bd_positions[${index}]}"
-        csv_paths+=("${var_dir}/hres_boundary8_${smooth}_${interp}_${bd_position}_res${resol}_${apply_mode}/${suffix}")
-        legend_names+=("Boundary 8 ${interp} ${smooth} ${bd_position} ${resol} ${apply_mode}")
-        if [ "${apply_mode}" == "interp" ]; then
-            styles+=("linestyle=--,linewidth=2,color=${colors[${index}]}")
-        else
-            styles+=("linestyle=:,linewidth=2,color=${colors[${index}]}")
-        fi
-    done
+apply_mode="direct"
+# Boundary-8 backbone rollouts, one per checkpoint (colors[0] is taken by the HRES curve).
+for index in "${!ckpts[@]}"; do
+    ckpt="${ckpts[${index}]}"
+    csv_paths+=("${var_dir}/${ckpt}/hres_boundary8_${smooth}_${interp}_${bd_position}_res${resol}_${apply_mode}/${suffix}")
+    legend_names+=("${ckpt} Boundary 8 ${bd_position}")
+    styles+=("linestyle=:,linewidth=2,color=${colors[$((index + 1))]}")
 done
 
 echo csv_paths[@]: "${csv_paths[@]}"

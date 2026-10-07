@@ -19,6 +19,8 @@ usage() {
     echo "  --boundary_resolution R  Boundary resolution: 0.25|0.5|1.5 (default: 0.25)" >&2
     echo "  --boundary_lowres_apply_mode M  direct|interp (default: interp)" >&2
     echo "  --pred VALUE             Enable prediction mode (true/false, default: false)" >&2
+    echo "  --checkpoint_name NAME   Checkpoint alias; outputs go to <output_root>/NAME/<config> (default: backbone_decoder)" >&2
+    echo "  --checkpoint_path PATH   model.safetensors to load (default: the backbone_decoder checkpoint)" >&2
     echo "  --embedding_save_steps \"S1 S2 ...\"  Rollout steps to extract embeddings for (default: \"1 6 24 72\")" >&2
     echo "  --no_embeddings          Disable embedding extraction entirely (predictions only, like the original script)" >&2
     echo "  --embedding_metrics      Compute embedding distance (cos/L2 vs ERA5) at EVERY rollout step" >&2
@@ -38,11 +40,21 @@ pred="false"
 embedding_save_steps="1 6 24 72"
 enable_embeddings="true"
 embedding_metrics="false"
+checkpoint_name="backbone_decoder"
+MODEL_CKPT_PATH="/tmp3/b12902101/train/50-train_loss=0.02831841-val_loss=0.03047114/model.safetensors"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pred)
             pred="$2"
+            shift 2
+            ;;
+        --checkpoint_name)
+            checkpoint_name="$2"
+            shift 2
+            ;;
+        --checkpoint_path)
+            MODEL_CKPT_PATH="$2"
             shift 2
             ;;
         --gpus)
@@ -106,10 +118,6 @@ done
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES_VALUE}"
 
-MODEL_CKPT_PATH="/tmp3/b12902101/train/50-train_loss=0.02831841-val_loss=0.03047114/model.safetensors"
-# MODEL_CKPT_PATH="/tmp3/b12902101/train/full_finetune_input_200epochs/model.safetensors"
-# MODEL_CKPT_PATH="/tmp2/yuanlim0919/lateral_smooth/model_weights/Aurora/model.safetensors"
-
 batch_size=8
 if [[ "${pred}" == "true" ]]; then
     start_time="2020-03-01 00:00:00"
@@ -131,17 +139,17 @@ ground_truth_root="/tmp3/yunye0121/era5_tw"
 boundary_source="hres"
 # boundary_source="aurora"
 
-OUTPUT_FOLDER_NAME="${output_root}/${boundary_source}_boundary${boundary_width}_${boundary_smooth_mode}_${boundary_time_interp_mode}_${replace_boundary_position}_res${boundary_resolution}_${boundary_lowres_apply_mode}"
+OUTPUT_FOLDER_NAME="${output_root}/${checkpoint_name}/${boundary_source}_boundary${boundary_width}_${boundary_smooth_mode}_${boundary_time_interp_mode}_${replace_boundary_position}_res${boundary_resolution}_${boundary_lowres_apply_mode}"
 
 # Embedding output is kept OUTSIDE Mazu/, tagged with the same run-config suffix as
 # OUTPUT_FOLDER_NAME above so multiple configs (e.g. baseline vs. boundary-replacement) can
 # later be compared side by side in plot_embedding_tsne_hooked.py via --embeddings_dirs/--labels.
 EMBEDDING_OUTPUT_ROOT="/tmp3/b12902101/finetuned_embedding_output"
 RUN_CONFIG_SUFFIX="${boundary_source}_boundary${boundary_width}_${replace_boundary_position}_res${boundary_resolution}_${boundary_lowres_apply_mode}"
-EMBEDDING_OUTPUT_DIR="${EMBEDDING_OUTPUT_ROOT}/embeddings/${RUN_CONFIG_SUFFIX}"
+EMBEDDING_OUTPUT_DIR="${EMBEDDING_OUTPUT_ROOT}/embeddings/${checkpoint_name}/${RUN_CONFIG_SUFFIX}"
 # On-the-fly cos/L2-vs-ERA5 curves. Same run-config suffix, so several configs can be compared
 # by pointing plot_embedding_distance.py-style plots at the sibling directories.
-EMBEDDING_METRICS_DIR="${EMBEDDING_OUTPUT_ROOT}/embedding_distance/${RUN_CONFIG_SUFFIX}"
+EMBEDDING_METRICS_DIR="${EMBEDDING_OUTPUT_ROOT}/embedding_distance/${checkpoint_name}/${RUN_CONFIG_SUFFIX}"
 
 embedding_args=()
 if [[ "${enable_embeddings}" == "true" ]]; then
@@ -155,7 +163,7 @@ if [[ "${embedding_metrics}" == "true" ]]; then
     mkdir -p "${EMBEDDING_METRICS_DIR}"
     embedding_args+=(
         "--embedding_metrics_output_dir" "${EMBEDDING_METRICS_DIR}"
-        "--embedding_metrics_label" "${RUN_CONFIG_SUFFIX}"
+        "--embedding_metrics_label" "${checkpoint_name}_${RUN_CONFIG_SUFFIX}"
     )
     # Metrics mode covers every rollout step by default and writes no predictions: drop any
     # --save_rollout_step so nothing lands on disk but the CSV and the plots.
